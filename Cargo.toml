@@ -1,34 +1,14 @@
 [package]
-name = "archive-list"
+name = "reqgov"
 version = "0.1.0"
 edition = "2021"
-description = "CLI tool to download README files from repositories listed in an archlist"
+description = "Multi-timebase HTTP API rate limiting middleware for reqwest - supports IETF draft, GitHub, and GitLab"
 license = "MIT"
-repository = "https://github.com/rektide/archive-list"
+repository = "https://github.com/rektide/reqgov"
 
-[[bin]]
-name = "archive-list"
-path = "src/main.rs"
+[lib]
+name = "reqgov"
+path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1.0"
-async-trait = "0.1"
-clap = { version = "4.5", features = ["derive"] }
-clap_complete = "4.5"
-config = "0.14"
-directories = "5.0"
-futures = "0.3"
 governor = "0.6"
-log = "0.4"
-nonzero_ext = "0.3"
-once_cell = "1.19"
-reqwest = { version = "0.12", features = ["json"] }
-serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.39", features = ["full"] }
-toml = "0.8"
-urlencoding = "2.1"
-chrono = { version = "0.4", features = ["serde"] }
-url = "2.5"
-
-[dev-dependencies]
-tokio-test = "0.4"
