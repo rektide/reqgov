@@ -1,138 +1,117 @@
-use crate::tracing::{
-    DetailedSpanBackend, MinimalSpanBackend, NoOpSpanBackend, RateLimitSpanBackend,
-    StandardSpanBackend,
-};
-use crate::HttpApiRateLimiter;
+/// Rate limiting telemetry middleware for reqwest-tracing spans
+///
+/// This middleware integrates with reqwest-tracing to enrich HTTP request spans
+/// with rate limiting telemetry from governor state. It does NOT create new spans,
+/// but adds attributes to spans created by reqwest-tracing.
+
+use crate::origin_limiter::OriginRateLimiter;
+use crate::tracing::{RateLimitSpanBackend, RateLimitState};
 use http::Extensions;
-use reqwest_middleware::reqwest::{Request, Response};
 use reqwest_middleware::{Middleware, Next, Result};
-use reqwest_ratelimit::RateLimiter;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
-pub struct TracingRateLimiter<S: RateLimitSpanBackend = StandardSpanBackend> {
-    rate_limiter: Arc<HttpApiRateLimiter>,
-    span_backend: PhantomData<S>,
+/// Middleware that enriches reqwest-tracing spans with rate limit telemetry
+///
+/// Usage with reqwest-tracing:
+/// ```no_run
+/// use reqwest_middleware::ClientBuilder;
+/// use reqwest_tracing::TracingMiddleware;
+/// use reqgov::{HttpApiRateLimiter, RateLimitTelemetry};
+/// 
+/// let rate_limiter = Arc::new(HttpApiRateLimiter::default());
+/// let telemetry = RateLimitTelemetry::new(rate_limiter.clone());
+/// 
+/// let client = ClientBuilder::new(reqwest::Client::new())
+///     .with(TracingMiddleware::default())
+///     .with(reqwest_ratelimit::all(rate_limiter))
+///     .with(telemetry)
+///     .build();
+/// ```
+pub struct RateLimitTelemetry<S: RateLimitSpanBackend> {
+    rate_limiter: Arc<OriginRateLimiter>,
+    span_backend: S,
+    _phantom: std::marker::PhantomData<S>,
 }
 
-impl<S: RateLimitSpanBackend> TracingRateLimiter<S> {
-    pub fn new(rate_limiter: Arc<HttpApiRateLimiter>) -> Self {
+impl<S: RateLimitSpanBackend + Default> RateLimitTelemetry<S> {
+    pub fn new(rate_limiter: Arc<OriginRateLimiter>) -> Self {
         Self {
             rate_limiter,
-            span_backend: PhantomData,
-        }
-    }
-
-    pub fn from_rate_limiter(rate_limiter: HttpApiRateLimiter) -> Self {
-        Self {
-            rate_limiter: Arc::new(rate_limiter),
-            span_backend: PhantomData,
+            span_backend: S::default(),
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl TracingRateLimiter<NoOpSpanBackend> {
-    pub fn new_no_tracing(rate_limiter: Arc<HttpApiRateLimiter>) -> Self {
+impl<S: RateLimitSpanBackend> RateLimitTelemetry<S> {
+    pub fn with_backend(rate_limiter: Arc<OriginRateLimiter>, span_backend: S) -> Self {
         Self {
             rate_limiter,
-            span_backend: PhantomData,
-        }
-    }
-    
-    pub fn from_rate_limiter_no_tracing(rate_limiter: HttpApiRateLimiter) -> Self {
-        Self {
-            rate_limiter: Arc::new(rate_limiter),
-            span_backend: PhantomData,
+            span_backend,
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl TracingRateLimiter<MinimalSpanBackend> {
-    pub fn new_minimal(rate_limiter: Arc<HttpApiRateLimiter>) -> Self {
-        Self {
-            rate_limiter,
-            span_backend: PhantomData,
-        }
-    }
-    
-    pub fn from_rate_limiter_minimal(rate_limiter: HttpApiRateLimiter) -> Self {
-        Self {
-            rate_limiter: Arc::new(rate_limiter),
-            span_backend: PhantomData,
-        }
+// Convenience constructors for common span backends
+impl RateLimitTelemetry<crate::tracing::MinimalSpanBackend> {
+    pub fn new_minimal(rate_limiter: Arc<OriginRateLimiter>) -> Self {
+        Self::new(rate_limiter)
     }
 }
 
-impl TracingRateLimiter<StandardSpanBackend> {
-    pub fn new_standard(rate_limiter: Arc<HttpApiRateLimiter>) -> Self {
-        Self {
-            rate_limiter,
-            span_backend: PhantomData,
-        }
-    }
-    
-    pub fn from_rate_limiter_standard(rate_limiter: HttpApiRateLimiter) -> Self {
-        Self {
-            rate_limiter: Arc::new(rate_limiter),
-            span_backend: PhantomData,
-        }
+impl RateLimitTelemetry<crate::tracing::StandardSpanBackend> {
+    pub fn new_standard(rate_limiter: Arc<OriginRateLimiter>) -> Self {
+        Self::new(rate_limiter)
     }
 }
 
-impl TracingRateLimiter<DetailedSpanBackend> {
-    pub fn new_detailed(rate_limiter: Arc<HttpApiRateLimiter>) -> Self {
-        Self {
-            rate_limiter,
-            span_backend: PhantomData,
-        }
-    }
-    
-    pub fn from_rate_limiter_detailed(rate_limiter: HttpApiRateLimiter) -> Self {
-        Self {
-            rate_limiter: Arc::new(rate_limiter),
-            span_backend: PhantomData,
-        }
+impl RateLimitTelemetry<crate::tracing::DetailedSpanBackend> {
+    pub fn new_detailed(rate_limiter: Arc<OriginRateLimiter>) -> Self {
+        Self::new(rate_limiter)
     }
 }
 
-impl Default for TracingRateLimiter<StandardSpanBackend> {
-    fn default() -> Self {
-        Self {
-            rate_limiter: Arc::new(HttpApiRateLimiter::new(Default::default())),
-            span_backend: PhantomData,
-        }
-    }
-}
-
-impl<S: RateLimitSpanBackend> Clone for TracingRateLimiter<S> {
+impl<S: RateLimitSpanBackend> Clone for RateLimitTelemetry<S> {
     fn clone(&self) -> Self {
         Self {
             rate_limiter: Arc::clone(&self.rate_limiter),
-            span_backend: PhantomData,
+            span_backend: self.span_backend.clone(),
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl<S: RateLimitSpanBackend + Send + Sync + 'static> Middleware for TracingRateLimiter<S> {
+impl<S: RateLimitSpanBackend + Send + Sync + 'static> Middleware for RateLimitTelemetry<S> {
     async fn handle(
         &self,
-        req: Request,
+        req: reqwest_middleware::reqwest::Request,
         extensions: &mut Extensions,
         next: Next<'_>,
-    ) -> Result<Response> {
-        let url = req.url().clone();
-        extensions.insert(url);
+    ) -> Result<reqwest_middleware::reqwest::Response> {
+        // Get current limiter state before request
+        let limiter_state = self.rate_limiter.state();
         
-        let _rate_limit_guard = self.rate_limiter.acquire_permit().await;
+        // Store URL for enrichment
+        let url = req.url().as_str().to_string();
+        let rate_limit_state = RateLimitState {
+            origin: Some(url),
+            smoother: limiter_state.smoother,
+            policies: limiter_state.policies,
+            will_throttle: limiter_state.will_throttle,
+            throttle_wait_duration: limiter_state.throttle_wait_duration,
+        };
         
+        // Store state in extensions for use after request
+        extensions.insert(rate_limit_state);
+        
+        // Execute request (rate limiting handled by reqwest_ratelimit middleware)
         let result = next.run(req, extensions).await;
         
-        if let Some(_url_ref) = extensions.get::<url::Url>() {
-            // We need the Request object, not just the URL
-            // The enrich_span method expects a Request, so we need to pass it somehow
-            // For now, we'll skip enrichment since we can't easily pass the Request
-            // In a real implementation, you might store the Request in a different way
+        // Enrich the span created by reqwest-tracing with rate limit state
+        if let Some(state) = extensions.get::<crate::tracing::RateLimitState>() {
+            self.span_backend.enrich_span(state);
         }
         
         result

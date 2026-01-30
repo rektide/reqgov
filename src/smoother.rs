@@ -3,10 +3,19 @@ use governor::state::InMemoryState;
 use governor::{Quota, RateLimiter};
 use std::num::NonZeroU32;
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct SmootherConfig {
     pub micro_interval_secs: u32,
     pub velocity: f64,
+}
+
+/// State snapshot for telemetry
+#[derive(Debug, Clone, Copy)]
+pub struct SmootherState {
+    pub remaining_per_interval: f64,
+    pub micro_interval_secs: u32,
+    pub velocity: f64,
+    pub base_window_secs: u32,
 }
 
 impl Default for SmootherConfig {
@@ -33,6 +42,22 @@ impl Smoother {
             base_window_secs: 60,
             micro_interval_secs: config.micro_interval_secs,
             velocity: config.velocity,
+        }
+    }
+    
+    /// Get state snapshot for telemetry
+    pub fn state(&self) -> SmootherState {
+        // Estimate remaining in current interval based on last governor check
+        // This is approximate since governor doesn't expose internal state directly
+        let intervals = self.base_window_secs / self.micro_interval_secs;
+        let per_interval = 1.0 / intervals as f64;
+        let remaining_per_interval = per_interval * self.velocity;
+        
+        SmootherState {
+            remaining_per_interval,
+            micro_interval_secs: self.micro_interval_secs,
+            velocity: self.velocity,
+            base_window_secs: self.base_window_secs,
         }
     }
 

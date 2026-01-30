@@ -5,6 +5,16 @@ use governor::{Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+/// State snapshot for telemetry
+#[derive(Debug, Clone)]
+pub struct PolicySlotState {
+    pub name: String,
+    pub quota: u32,
+    pub remaining: u32,
+    pub window_secs: u32,
+    pub reset_at: Option<std::time::Instant>,
+}
+
 pub struct PolicySlot {
     pub policy: Policy,
     pub remaining: u32,
@@ -68,6 +78,17 @@ impl PolicySlot {
 
     pub async fn wait(&self) {
         self.governor.until_ready().await;
+    }
+    
+    /// Get state snapshot for telemetry
+    pub fn state(&self) -> PolicySlotState {
+        PolicySlotState {
+            name: self.policy.name.clone(),
+            quota: self.policy.quota,
+            remaining: self.remaining,
+            window_secs: self.policy.window_secs.unwrap_or(60),
+            reset_at: self.reset_at,
+        }
     }
 }
 

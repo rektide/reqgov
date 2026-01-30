@@ -1,6 +1,6 @@
 use crate::policy::{Policy, ServiceLimit};
-use crate::policy_slot::PolicySlot;
-use crate::smoother::{Smoother, SmootherConfig};
+use crate::policy_slot::{PolicySlot, PolicySlotState};
+use crate::smoother::{Smoother, SmootherConfig, SmootherState};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -8,6 +8,15 @@ use std::time::Duration;
 pub enum RateLimitViolation {
     Smoothed { wait_duration: Duration },
     PolicyExceeded { policy_name: String, wait_duration: Duration },
+}
+
+/// State snapshot for telemetry
+#[derive(Debug, Clone)]
+pub struct OriginRateLimiterState {
+    pub smoother: Option<SmootherState>,
+    pub policies: Vec<PolicySlotState>,
+    pub will_throttle: bool,
+    pub throttle_wait_duration: Option<Duration>,
 }
 
 pub struct OriginRateLimiter {
@@ -84,6 +93,30 @@ impl OriginRateLimiter {
 
         for slot in self.slots.values() {
             slot.wait().await;
+        }
+    }
+    
+    /// Get state snapshot for telemetry
+    pub fn state(&self) -> OriginRateLimiterState {
+        let smoother_state = self.smoother.state();
+        
+        let policy_states: Vec<PolicySlotState> = self.slots
+            .values()
+            .map(|slot| slot.state())
+            .collect();
+        
+        // Check if throttling will occur
+        let will_throttle = self.check().is_err();
+        let throttle_wait_duration = self.check().err().map(|violation| match violation {
+            RateLimitViolation::Smoothed { wait_duration } => wait_duration,
+            RateLimitViolation::PolicyExceeded { wait_duration, .. } => wait_duration,
+        });
+        
+        OriginRateLimiterState {
+            smoother: Some(smoother_state),
+            policies: policy_states,
+            will_throttle,
+            throttle_wait_duration,
         }
     }
 }
