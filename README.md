@@ -110,10 +110,36 @@ let config = SmootherConfig {
 // 0.5 = Conservative: use only half the quota rate
 // 1.0 = Even spread: finish exactly at window end
 // 1.5 = Default: race ahead, finish 33% early
-// 2.0 = Aggressive: finish 50% early
+ // 2.0 = Aggressive: finish 50% early
+ ```
+
+### Tracing Integration
+
+Enrich reqwest-tracing spans with governor rate limit state:
+
+```rust
+use reqgov::{HttpApiRateLimiter, RateLimitTelemetry};
+use reqwest_middleware::ClientBuilder;
+use reqwest_tracing::TracingMiddleware;
+
+let rate_limiter = Arc::new(HttpApiRateLimiter::default());
+
+let client = ClientBuilder::new(reqwest::Client::new())
+    .with(TracingMiddleware::default())  // Creates HTTP request spans
+    .with(reqwest_ratelimit::all(rate_limiter.clone()))  // Apply rate limiting
+    .with(RateLimitTelemetry::new_standard(rate_limiter))  // Enrich spans
+    .build();
 ```
 
-## API
+Four verbosity levels:
+- `NoOpSpanBackend` - Disabled (zero-cost)
+- `MinimalSpanBackend` - Only status flags
+- `StandardSpanBackend` - Basic state (velocity, remaining)
+- `DetailedSpanBackend` - Full timing (reset times, throttle duration)
+
+Span attributes: `rate_limit.enabled`, `rate_limit.will_throttle`, `rate_limit.origin`, `rate_limit.smoother.velocity`, `rate_limit.policy.{name}.remaining`, etc.
+
+ ## API
 
 ### `SmootherConfig`
 
@@ -230,10 +256,68 @@ A request must pass **ALL** limits to proceed.
 │  │  │  └──────────────────────────────────────────────┘   │  │  │
 │  │  └─────────────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
+ └─────────────────────────────────────────────────────────────────┘
+ ```
 
-## Contributing
+ ## Technical Notes
+
+### Constraints
+
+Governor's architecture imposes constraints on telemetry accuracy:
+
+- **No internal permit count exposure**: Governor doesn't provide direct access to remaining permits per limiter. State snapshots are derived from rate and window calculations, not actual counters.
+
+- **Approximate smoother state**: Smoother's micro-interval pacing doesn't expose granular permit tracking. `SmootherState.remaining_per_interval` is a velocity-based approximation, not an exact count.
+
+- **Race conditions with concurrent requests**: State snapshots (`state()` methods) capture a point-in-time view. Multiple concurrent requests may see stale state before governor updates internal counters.
+
+- **No visibility into permit queue depth**: Governor queues waiting requests but doesn't expose queue length. Cannot report "X requests waiting in queue" via spans.
+
+- **Policy reset time uncertainty**: `PolicySlotState.reset_at` is set from HTTP header timestamps, not actual governor reset times. May drift from governor's internal clock.
+
+- **No per-request wait duration**: Governor signals when permits are available but doesn't report how long requests waited. Can't record "acquired after 150ms" in spans.
+
+### Possible Enhancements
+
+#### Span Enrichment Extensions
+
+Current span enrichment provides governor state snapshots, but several enhancements would improve observability:
+
+**Permit queue depth telemetry** - Add histogram metric tracking number of requests waiting in governor's queue. Requires governor modifications to expose `queue.len()`.
+
+**Per-request wait duration** - Instrument `acquire_permit()` to measure and record wait time in spans. Example attribute: `rate_limit.wait_duration_ms = 150`.
+
+**Dynamic attribute selection** - Allow users to specify which span attributes they want via configuration, reducing telemetry overhead for unneeded fields.
+
+**Span context propagation** - Pass governor state from request to response span, enabling correlation of rate limit state with HTTP status codes.
+
+**Policy violation spans** - Create new span when rate limit would be exceeded, recording which policy failed and by how much (e.g., "burst quota exceeded by 5 requests").
+
+**Smoother histogram metrics** - Track smoother behavior over time: micro-intervals utilized, velocity adjustments, throttling events.
+
+**Throttle event telemetry** - When throttling occurs, create span with context: which policy triggered it, expected wait duration, and reason (burst vs daily limit).
+
+### Testing Considerations
+
+Tracing integration testing presents unique challenges:
+
+- **Span isolation**: Tests must ensure span contexts don't leak between test functions. `tracing_subscriber::Registry()` with default layer avoids test contamination.
+
+- **Mock governor behavior**: Tests require controllable governor state to verify span attributes. Consider test utilities that set specific permit counts, velocities, and reset times.
+
+- **Concurrency testing**: Span enrichment with concurrent requests needs careful synchronization to verify state consistency. May need barriers to control request timing.
+
+- **Backend completeness**: Each backend (NoOp, Minimal, Standard, Detailed) needs distinct test coverage. Verify correct attributes are recorded/not-recorded per backend.
+
+- **Middleware ordering**: Tests should validate middleware ordering: TracingMiddleware → reqwest_ratelimit → RateLimitTelemetry ensures spans exist before enrichment.
+
+- **Performance benchmarks**: Measure NoOp vs Standard vs Detailed overhead. Governor calls are O(1), but span recording costs vary with attribute count.
+
+- **Header parsing edge cases**: Test with malformed IETF headers, missing policies, and duplicate policy names to ensure span enrichment handles errors gracefully.
+
+- **Origin isolation**: Verify span attributes correctly distinguish multiple origins (e.g., github.com vs gitlab.com) in concurrent requests.
+
+ ## Contributing
 
 Contributions welcome! Please feel free to submit a Pull Request.
 
