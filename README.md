@@ -271,7 +271,7 @@ Governor's architecture imposes constraints on telemetry accuracy:
 
 - **Race conditions with concurrent requests**: State snapshots (`state()` methods) capture a point-in-time view. Multiple concurrent requests may see stale state before governor updates internal counters.
 
-- **No visibility into permit queue depth**: Governor queues waiting requests but doesn't expose queue length. Cannot report "X requests waiting in queue" via spans.
+ - **No visibility into permit queue depth**: Governor's GCRA implementation doesn't expose the number of concurrent requests waiting for permits. When multiple requests call `until_ready()` simultaneously, they queue internally, but this queue length isn't accessible. *Deferred enhancement*: Would require forking governor to expose queue metadata or maintaining our own waiter tracking. Would enable metrics like "request was 3rd in queue" and help identify congestion patterns.
 
  - **Policy reset time uncertainty**: `PolicySlotState.reset_at` is set from HTTP header timestamps, not actual governor reset times. May drift from governor's internal clock.
 
@@ -353,7 +353,7 @@ But this adds complexity: shadow counts can diverge from governor's actual state
 
 Current span enrichment provides governor state snapshots, but several enhancements would improve observability:
 
-**Permit queue depth telemetry** - Add histogram metric tracking number of requests waiting in governor's queue. Requires governor modifications to expose `queue.len()`.
+ **Permit queue depth telemetry** *(deferred)* - Add histogram metric tracking number of requests waiting in governor's queue. Currently governor's GCRA implementation doesn't expose queue length; would require forking governor or maintaining our own waiters tracking. This would enable metrics like "X requests queued behind current request" and help identify congestion patterns.
 
 **Per-request wait duration** - Instrument `acquire_permit()` to measure and record wait time in spans. Example attribute: `rate_limit.wait_duration_ms = 150`.
 
