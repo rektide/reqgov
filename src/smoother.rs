@@ -76,6 +76,17 @@ mod tests {
     }
 
     #[test]
+    fn test_smoother_custom_config() {
+        let config = SmootherConfig {
+            micro_interval_secs: 5,
+            velocity: 2.0,
+        };
+        let smoother = Smoother::new(config);
+        assert_eq!(smoother.micro_interval_secs, 5);
+        assert_eq!(smoother.velocity, 2.0);
+    }
+
+    #[test]
     fn test_smoother_configure() {
         let config = SmootherConfig::default();
         let mut smoother = Smoother::new(config);
@@ -84,9 +95,66 @@ mod tests {
     }
 
     #[test]
+    fn test_smoother_velocity_multiplier() {
+        let config = SmootherConfig {
+            micro_interval_secs: 2,
+            velocity: 2.0,
+        };
+        let mut smoother = Smoother::new(config);
+
+        smoother.configure(100, 60);
+        assert_eq!(smoother.base_window_secs, 60);
+
+        smoother.check().unwrap();
+    }
+
+    #[test]
+    fn test_smoother_conservative_velocity() {
+        let config = SmootherConfig {
+            micro_interval_secs: 1,
+            velocity: 0.5,
+        };
+        let mut smoother = Smoother::new(config);
+        smoother.configure(50, 60);
+
+        assert!(smoother.check().is_ok());
+    }
+
+    #[test]
     fn test_smoother_check() {
         let config = SmootherConfig::default();
         let smoother = Smoother::new(config);
         assert!(smoother.check().is_ok());
+    }
+
+    #[test]
+    fn test_smoother_custom_interval() {
+        let config = SmootherConfig {
+            micro_interval_secs: 10,
+            velocity: 1.0,
+        };
+        let mut smoother = Smoother::new(config);
+        smoother.configure(1000, 3600);
+        assert_eq!(smoother.base_window_secs, 3600);
+        assert_eq!(smoother.micro_interval_secs, 10);
+    }
+
+    #[test]
+    fn test_smoother_large_window() {
+        let config = SmootherConfig::default();
+        let mut smoother = Smoother::new(config);
+        smoother.configure(10000, 86400);
+        assert_eq!(smoother.base_window_secs, 86400);
+        assert!(smoother.check().is_ok());
+    }
+
+    #[test]
+    fn test_smoother_zero_remaining_defaults_to_min_rate() {
+        let config = SmootherConfig::default();
+        let mut smoother = Smoother::new(config);
+        smoother.configure(0, 60);
+
+        let result = smoother.check();
+        assert!(result.is_ok(), "Zero remaining defaults to minimum rate, doesn't block");
     }
 }

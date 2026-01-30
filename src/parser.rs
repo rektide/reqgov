@@ -120,6 +120,34 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_policy_content_bytes() {
+        let input = r#""bandwidth";q=1048576;w=60;qu="content-bytes""#;
+        let result = parse_policy_item(input).unwrap();
+        assert_eq!(result.name, "bandwidth");
+        assert_eq!(result.quota, 1048576);
+        assert_eq!(result.quota_unit, QuotaUnit::ContentBytes);
+    }
+
+    #[test]
+    fn test_parse_policy_without_window() {
+        let input = r#""unlimited";q=999999"#;
+        let result = parse_policy_item(input).unwrap();
+        assert_eq!(result.name, "unlimited");
+        assert_eq!(result.quota, 999999);
+        assert_eq!(result.window_secs, None);
+    }
+
+    #[test]
+    fn test_parse_policy_with_partition_key() {
+        let input = r#""tiered";q=1000;w=60;pk=YXV0aC1rZXk="#;
+        let result = parse_policy_item(input).unwrap();
+        assert_eq!(result.name, "tiered");
+        assert!(result.partition_key.is_some());
+        let key = result.partition_key.unwrap();
+        assert_eq!(key, b"auth-key");
+    }
+
+    #[test]
     fn test_parse_limit_single() {
         let input = r#""burst";r=45;t=30"#;
         let result = parse_limit_item(input).unwrap();
@@ -129,11 +157,50 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_limit_without_reset() {
+        let input = r#""unlimited";r=999999"#;
+        let result = parse_limit_item(input).unwrap();
+        assert_eq!(result.name, "unlimited");
+        assert_eq!(result.remaining, 999999);
+        assert_eq!(result.reset_secs, None);
+    }
+
+    #[test]
+    fn test_parse_limit_zero_remaining() {
+        let input = r#""burst";r=0;t=5"#;
+        let result = parse_limit_item(input).unwrap();
+        assert_eq!(result.remaining, 0);
+        assert_eq!(result.reset_secs, Some(5));
+    }
+
+    #[test]
     fn test_parse_structured_list() {
         let input = r#""burst";q=100;w=60, "daily";q=1000;w=86400"#;
         let result = parse_structured_list(input, parse_policy_item);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].name, "burst");
         assert_eq!(result[1].name, "daily");
+    }
+
+    #[test]
+    fn test_parse_structured_list_empty_items() {
+        let input = r#"  "burst";q=100;w=60  ,  "daily";q=1000;w=86400  "#;
+        let result = parse_structured_list(input, parse_policy_item);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_quota_unit_defaults() {
+        assert_eq!(parse_quota_unit("unknown"), QuotaUnit::Requests);
+        assert_eq!(
+            parse_quota_unit("concurrent-requests"),
+            QuotaUnit::ConcurrentRequests
+        );
+        assert_eq!(parse_quota_unit("CONTENT-BYTES"), QuotaUnit::ContentBytes);
+    }
+
+    #[test]
+    fn test_parse_invalid_base64_returns_none() {
+        assert!(parse_base64("!!!invalid!!!").is_none());
     }
 }

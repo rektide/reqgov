@@ -103,4 +103,103 @@ mod tests {
         let slot = PolicySlot::new(policy);
         assert!(slot.check().is_ok());
     }
+
+    #[test]
+    fn test_policy_slot_update() {
+        let policy = Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        };
+
+        let mut slot = PolicySlot::new(policy);
+        assert_eq!(slot.remaining, 100);
+
+        let limit = ServiceLimit {
+            name: "burst".to_string(),
+            remaining: 45,
+            reset_secs: Some(30),
+            partition_key: None,
+        };
+
+        slot.update(&limit);
+        assert_eq!(slot.remaining, 45);
+        assert!(slot.reset_at.is_some());
+    }
+
+    #[test]
+    fn test_policy_slot_update_without_reset() {
+        let policy = Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        };
+
+        let mut slot = PolicySlot::new(policy);
+
+        let limit = ServiceLimit {
+            name: "burst".to_string(),
+            remaining: 80,
+            reset_secs: None,
+            partition_key: None,
+        };
+
+        slot.update(&limit);
+        assert_eq!(slot.remaining, 80);
+        assert!(slot.reset_at.is_none());
+    }
+
+    #[test]
+    fn test_policy_slot_governor_rebuild_on_quota_drop() {
+        let policy = Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        };
+
+        let mut slot = PolicySlot::new(policy);
+        let initial_governor_quota = slot.governor_quota;
+
+        let limit = ServiceLimit {
+            name: "burst".to_string(),
+            remaining: 10,
+            reset_secs: Some(30),
+            partition_key: None,
+        };
+
+        slot.update(&limit);
+        assert_eq!(slot.remaining, 10);
+        assert_ne!(slot.governor_quota, initial_governor_quota);
+    }
+
+    #[test]
+    fn test_policy_slot_governor_no_rebuild_small_change() {
+        let policy = Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        };
+
+        let mut slot = PolicySlot::new(policy);
+        let initial_governor_quota = slot.governor_quota;
+
+        let limit = ServiceLimit {
+            name: "burst".to_string(),
+            remaining: 95,
+            reset_secs: None,
+            partition_key: None,
+        };
+
+        slot.update(&limit);
+        assert_eq!(slot.remaining, 95);
+        assert_eq!(slot.governor_quota, initial_governor_quota);
+    }
 }
