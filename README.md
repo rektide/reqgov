@@ -273,11 +273,81 @@ Governor's architecture imposes constraints on telemetry accuracy:
 
 - **No visibility into permit queue depth**: Governor queues waiting requests but doesn't expose queue length. Cannot report "X requests waiting in queue" via spans.
 
-- **Policy reset time uncertainty**: `PolicySlotState.reset_at` is set from HTTP header timestamps, not actual governor reset times. May drift from governor's internal clock.
+ - **Policy reset time uncertainty**: `PolicySlotState.reset_at` is set from HTTP header timestamps, not actual governor reset times. May drift from governor's internal clock.
 
 - **No per-request wait duration**: Governor signals when permits are available but doesn't report how long requests waited. Can't record "acquired after 150ms" in spans.
 
-### Possible Enhancements
+- **Calculated vs actual smoother state**: `SmootherState.remaining_per_interval` is a velocity-based calculation (`per_interval * velocity`), not the actual permit count from governor's token bucket. Governor's internal bucket state is private.
+
+- **Header-derived remaining counts**: `PolicySlotState.remaining` comes from parsed IETF headers (`RateLimit: "burst";r=45`), not governor's internal permit tracker. When headers are stale or missing, state is approximate.
+
+- **No token bucket visibility**: Governor uses a token bucket algorithm but doesn't expose bucket level, refill rate in progress, or time until next permit. Can only query "ready now" (check) or "wait duration" (check error).
+
+- **Multi-policy intersection opacity**: Actual rate limit is the minimum of all policies (burst AND daily AND hourly), but we can't report "policy X is the bottleneck" except through check() errors. No visibility into which policy has the tightest constraint at runtime.
+
+- **Clock source mismatch**: Governor uses `DefaultClock` internally, but `reset_at` uses `Instant::now() + Duration`. These may drift, especially under system time changes or clock adjustments.
+
+ - **Rebuild policy hides state**: When `PolicySlot` rebuilds its governor (on quota drops >20%), the old governor state is discarded. Can't track historical permit consumption or see how many permits were actually used between rebuilds.
+
+### Governor Architecture Constraints
+
+Governor's design philosophy prioritizes simplicity and safety over observability. Understanding these architectural constraints clarifies what telemetry is possible:
+
+**Token Bucket Abstraction**: Governor's `RateLimiter` wraps a token bucket algorithm internally but exposes only two operations:
+- `check()` - Acquire permit immediately or return wait duration
+- `until_ready()` - Wait until permit available
+
+The bucket level (`tokens_remaining`) is private state in `InMemoryState`. This is intentional: exposing it would require locking and synchronization that governor avoids for performance.
+
+**No Query API**: Unlike some rate limiting libraries (e.g., `token-bucket-rs`), governor provides no query methods like:
+- `tokens_available()`
+- `next_refill_time()`
+- `queue_length()`
+
+This design forces applications to track their own state if they need visibility. We approximate this with header-derived `remaining` values and velocity-based smoother estimates.
+
+**Clock Opacity**: Governor's `DefaultClock` wraps `Instant::now()` but doesn't expose when it was last called or how much time has elapsed since the last refill. We can't calculate "X permits will refill in Y seconds" because we don't know when the bucket was last refilled.
+
+**Rebuilds Destroy History**: `PolicySlot` rebuilds its `RateLimiter` when remaining quota drops significantly (`remaining < old_remaining - old_remaining/5`). This optimization prevents unnecessary reconfiguration, but it also means:
+- Old bucket state is lost
+- No way to track "permits used since last update"
+- Can't distinguish between "natural" permit consumption vs quota drops from new headers
+
+**Smoothing Approximation**: The smoother divides the fastest policy's window into micro-intervals (e.g., 60s / 2s = 30 intervals). `SmootherState.remaining_per_interval` is calculated as:
+```rust
+let intervals = base_window_secs / micro_interval_secs;
+let per_interval = 1.0 / intervals as f64;
+let remaining_per_interval = per_interval * velocity;
+```
+
+This is a theoretical maximum, not the actual permits governor has allocated. Governor only enforces this rate through `Quota::per_second()`, but doesn't report how many permits are actually left in the current interval.
+
+**Multi-Policy Coordination**: `OriginRateLimiter.check()` checks each policy sequentially:
+```rust
+self.smoother.check()?;  // Must pass
+for slot in self.slots.values() {
+    slot.check()?;  // ALL must pass
+}
+```
+
+We report `will_throttle: true` if ANY check fails, but we can't report which policy will reset first or which has the most restrictive remaining permits without calling `check()` on each individually.
+
+**Why Not Fork Governor?**: We could fork governor to expose more state, but this has tradeoffs:
+- Maintainability burden tracking upstream changes
+- Governor's simple API is a feature, not a bug
+- Token bucket algorithms are well-studied; our approximations are sufficient for most telemetry use cases
+
+**Alternative: Shadow Counters**: To get accurate permit counts without governor modifications, we could maintain our own counter alongside governor's enforcement:
+```rust
+struct PolicySlot {
+    governor: RateLimiter<...>,
+    shadow_remaining: AtomicU32,  // Decrement on each acquire
+}
+```
+
+But this adds complexity: shadow counts can diverge from governor's actual state, require synchronization, and increase overhead on every permit acquisition.
+
+ ### Possible Enhancements
 
 #### Span Enrichment Extensions
 
