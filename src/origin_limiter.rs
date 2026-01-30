@@ -1,6 +1,7 @@
 use crate::policy::{Policy, ServiceLimit};
 use crate::policy_slot::{PolicySlot, PolicySlotState};
 use crate::smoother::{Smoother, SmootherConfig, SmootherState};
+use governor::clock::Clock;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -76,12 +77,14 @@ impl OriginRateLimiter {
     pub fn check(&self) -> Result<(), RateLimitViolation> {
         self.smoother
             .check()
-            .map_err(|wait| RateLimitViolation::Smoothed { wait_duration: wait })?;
+            .map_err(|not_until| RateLimitViolation::Smoothed {
+                wait_duration: not_until.wait_time_from(self.smoother.clock().now()),
+            })?;
 
         for (name, slot) in &self.slots {
-            slot.check().map_err(|wait| RateLimitViolation::PolicyExceeded {
+            slot.check().map_err(|not_until| RateLimitViolation::PolicyExceeded {
                 policy_name: name.clone(),
-                wait_duration: wait,
+                wait_duration: not_until.wait_time_from(slot.clock().now()),
             })?;
         }
 
@@ -99,19 +102,20 @@ impl OriginRateLimiter {
     /// Get state snapshot for telemetry
     pub fn state(&self) -> OriginRateLimiterState {
         let smoother_state = self.smoother.state();
-        
+
         let policy_states: Vec<PolicySlotState> = self.slots
             .values()
             .map(|slot| slot.state())
             .collect();
-        
-        // Check if throttling will occur
-        let will_throttle = self.check().is_err();
-        let throttle_wait_duration = self.check().err().map(|violation| match violation {
+
+        // Check if throttling will occur (note: this consumes a permit)
+        let check_result = self.check();
+        let will_throttle = check_result.is_err();
+        let throttle_wait_duration = check_result.err().map(|violation| match violation {
             RateLimitViolation::Smoothed { wait_duration } => wait_duration,
             RateLimitViolation::PolicyExceeded { wait_duration, .. } => wait_duration,
         });
-        
+
         OriginRateLimiterState {
             smoother: Some(smoother_state),
             policies: policy_states,

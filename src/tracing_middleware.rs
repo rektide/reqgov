@@ -3,20 +3,46 @@
 /// This middleware integrates with reqwest-tracing to enrich HTTP request spans
 /// with rate limiting telemetry from governor state. It does NOT create new spans,
 /// but adds attributes to spans created by reqwest-tracing.
+///
+/// # Example Usage
+///
+/// ```ignore
+/// use reqwest_middleware::ClientBuilder;
+/// use reqwest_tracing::TracingMiddleware;
+/// use reqgov::{HttpApiRateLimiter, RateLimitTelemetry, SmootherConfig};
+/// use std::sync::Arc;
+///
+/// let rate_limiter = Arc::new(HttpApiRateLimiter::new(SmootherConfig::default()));
+/// let telemetry = RateLimitTelemetry::new(rate_limiter.clone());
+///
+/// let client = ClientBuilder::new(reqwest::Client::new())
+///     .with(TracingMiddleware::default())
+///     .with(reqwest_ratelimit::all(rate_limiter))
+///     .with(telemetry)
+///     .build();
+/// ```
+///
+/// # Note
+///
+/// To use the doctest example, you need the following dependencies in Cargo.toml:
+/// - `reqwest` - for reqwest::Client
+/// - `reqwest-middleware` - for ClientBuilder
+/// - `reqwest-tracing` - for TracingMiddleware
+/// - `reqwest-ratelimit` - for reqwest_ratelimit::all
+/// ```
 
 use crate::origin_limiter::OriginRateLimiter;
 use crate::tracing::{RateLimitSpanBackend, RateLimitState};
+use crate::SmootherConfig;
 use http::Extensions;
 use reqwest_middleware::{Middleware, Next, Result};
 use std::sync::Arc;
-
-/// Middleware that enriches reqwest-tracing spans with rate limit telemetry
-///
 /// Usage with reqwest-tracing:
 /// ```no_run
 /// use reqwest_middleware::ClientBuilder;
 /// use reqwest_tracing::TracingMiddleware;
 /// use reqgov::{HttpApiRateLimiter, RateLimitTelemetry};
+/// use std::sync::Arc;
 /// 
 /// let rate_limiter = Arc::new(HttpApiRateLimiter::default());
 /// let telemetry = RateLimitTelemetry::new(rate_limiter.clone());

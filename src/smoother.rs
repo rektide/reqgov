@@ -1,6 +1,8 @@
 use governor::clock::{Clock, DefaultClock};
+use governor::middleware::{StateInformationMiddleware, StateSnapshot};
 use governor::state::InMemoryState;
-use governor::{Quota, RateLimiter};
+use governor::{NotUntil, Quota, RateLimiter};
+use std::sync::Mutex;
 use std::num::NonZeroU32;
 
 #[derive(Debug, Clone, Copy)]
@@ -28,7 +30,8 @@ impl Default for SmootherConfig {
 }
 
 pub struct Smoother {
-    governor: RateLimiter<governor::state::NotKeyed, InMemoryState, DefaultClock>,
+    governor: RateLimiter<governor::state::NotKeyed, InMemoryState, DefaultClock, StateInformationMiddleware>,
+    last_snapshot: Mutex<Option<StateSnapshot>>,
 
     base_window_secs: u32,
     micro_interval_secs: u32,
@@ -38,7 +41,9 @@ pub struct Smoother {
 impl Smoother {
     pub fn new(config: SmootherConfig) -> Self {
         Self {
-            governor: RateLimiter::direct(Quota::per_second(NonZeroU32::MIN)),
+            governor: RateLimiter::direct(Quota::per_second(NonZeroU32::MIN))
+                .with_middleware::<StateInformationMiddleware>(),
+            last_snapshot: Mutex::new(None),
             base_window_secs: 60,
             micro_interval_secs: config.micro_interval_secs,
             velocity: config.velocity,
@@ -47,14 +52,15 @@ impl Smoother {
     
     /// Get state snapshot for telemetry
     pub fn state(&self) -> SmootherState {
-        // Estimate remaining in current interval based on last governor check
-        // This is approximate since governor doesn't expose internal state directly
-        let intervals = self.base_window_secs / self.micro_interval_secs;
-        let per_interval = 1.0 / intervals as f64;
-        let remaining_per_interval = per_interval * self.velocity;
-        
+        // Use actual governor state from cached snapshot
+        let snapshot = self.last_snapshot.lock().unwrap();
+        let remaining = snapshot
+            .as_ref()
+            .map(|s| s.remaining_burst_capacity() as f64)
+            .unwrap_or(0.0);
+
         SmootherState {
-            remaining_per_interval,
+            remaining_per_interval: remaining,
             micro_interval_secs: self.micro_interval_secs,
             velocity: self.velocity,
             base_window_secs: self.base_window_secs,
@@ -71,19 +77,26 @@ impl Smoother {
         let per_second = per_interval as f64 / self.micro_interval_secs as f64;
         let rps = NonZeroU32::new(per_second.ceil() as u32).unwrap_or(NonZeroU32::MIN);
 
-        self.governor = RateLimiter::direct(Quota::per_second(rps));
+        self.governor = RateLimiter::direct(Quota::per_second(rps))
+            .with_middleware::<StateInformationMiddleware>();
+        *self.last_snapshot.lock().unwrap() = None; // Clear cached snapshot on reconfigure
     }
 
-    pub fn check(&self) -> Result<(), std::time::Duration> {
-        let clock = DefaultClock::default();
-        let now = clock.now();
-        self.governor
-            .check()
-            .map_err(|not_until| not_until.wait_time_from(now))
+    pub fn check(&self) -> Result<StateSnapshot, NotUntil<<DefaultClock as Clock>::Instant>> {
+        let result = self.governor.check();
+        // Cache snapshot for telemetry access
+        if let Ok(ref snapshot) = result {
+            *self.last_snapshot.lock().unwrap() = Some(snapshot.clone());
+        }
+        result
     }
 
     pub async fn wait(&self) {
         self.governor.until_ready().await;
+    }
+
+    pub fn clock(&self) -> &DefaultClock {
+        self.governor.clock()
     }
 }
 
