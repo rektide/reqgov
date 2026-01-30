@@ -24,7 +24,6 @@ pub struct Smoother {
     base_window_secs: u32,
     micro_interval_secs: u32,
     velocity: f64,
-    config: SmootherConfig,
 }
 
 impl Smoother {
@@ -34,7 +33,6 @@ impl Smoother {
             base_window_secs: 60,
             micro_interval_secs: config.micro_interval_secs,
             velocity: config.velocity,
-            config,
         }
     }
 

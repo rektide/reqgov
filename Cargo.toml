@@ -11,12 +11,11 @@ name = "reqgov"
 path = "src/lib.rs"
 
 [dependencies]
-async-trait = "0.1"
 base64 = "0.22"
 governor = "0.10"
 http = "1.1"
 reqwest-ratelimit = "0.5"
-tokio = { version = "1", features = ["sync", "rt"] }
+tokio = { version = "1", features = ["sync"] }
 url = "2.5"
 
 [dev-dependencies]
