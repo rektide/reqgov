@@ -1,5 +1,4 @@
-#[cfg(test)]
-mod tests {
+mod integration_tests {
     use super::*;
     use http::Extensions;
     use std::sync::Arc;

@@ -6,7 +6,7 @@ pub mod stub {
 use reqwest_ratelimit::RateLimiter;
 use stub::limiter::StubRateLimiter;
 
-#[tokio::test]
+#[test]
 async fn simple_ratelimit_test() {
     let limiter = StubRateLimiter;
     RateLimiter::acquire_permit(&limiter).await;
