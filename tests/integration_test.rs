@@ -1,9 +1,10 @@
 // Include stub module
-#[path = "../test/stub/limiter.rs"]
-mod stub_limiter;
+pub mod stub {
+    pub mod limiter;
+}
 
 use reqwest_ratelimit::RateLimiter;
-use stub_limiter::StubRateLimiter;
+use stub::limiter::StubRateLimiter;
 
 #[tokio::test]
 async fn simple_ratelimit_test() {
