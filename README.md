@@ -387,6 +387,19 @@ Tracing integration testing presents unique challenges:
 
 - **Origin isolation**: Verify span attributes correctly distinguish multiple origins (e.g., github.com vs gitlab.com) in concurrent requests.
 
+### Rate Limiting Enhancements
+
+**Concurrency limiting** - Add optional global and per-domain semaphores to limit maximum concurrent requests:
+
+- **Global semaphore**: Limit total concurrent requests across all domains (e.g., max 100 total requests system-wide)
+- **Per-domain semaphore**: Limit concurrent requests per origin/domain (e.g., max 10 requests per API domain)
+- **Optional enforcement**: Disabled by default to avoid breaking existing behavior
+- **Configuration**: Expose via `HttpApiRateLimiter::Config` or extend `SmootherConfig` with concurrency settings
+- **Implementation**: Use `tokio::sync::Semaphore` for async concurrency control, apply before rate limiting (concurrency limit first, then rate limit)
+- **Telemetry**: Add concurrent request count metrics (pending requests waiting on semaphore, active requests)
+
+This would allow users to control how many requests are made simultaneously, preventing overload and respecting API server capacity limits beyond rate limits.
+
  ## Contributing
 
 Contributions welcome! Please feel free to submit a Pull Request.
