@@ -13,11 +13,19 @@ pub struct CheckMetrics {
     pub wait_duration: Option<Duration>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum StateMode {
+    Historical,
+    Fresh,
+}
+
 #[derive(Debug, Clone)]
 pub struct LastCheckResult {
     pub timestamp: Instant,
-    pub smoother: Option<CheckMetrics>,
-    pub policies: Vec<(String, CheckMetrics)>,
+    pub smoother_state: Option<SmootherState>,
+    pub policy_states: Vec<(String, PolicySlotState)>,
+    pub smoother_metrics: Option<CheckMetrics>,
+    pub policy_metrics: Vec<(String, CheckMetrics)>,
     pub total_duration: Duration,
     pub all_passed: bool,
     pub limiting_policy: Option<String>,
@@ -37,6 +45,7 @@ pub struct OriginRateLimiterState {
     pub will_throttle: bool,
     pub throttle_wait_duration: Option<Duration>,
     pub last_check: Option<LastCheckResult>,
+    pub mode: StateMode,
 }
 
 impl OriginRateLimiterState {
@@ -107,7 +116,8 @@ impl OriginRateLimiter {
         let smoother_start = Instant::now();
         let smoother_result = self.smoother.check();
         let smoother_duration = smoother_start.elapsed();
-        let smoother_check = CheckMetrics {
+        let smoother_state = self.smoother.state();
+        let smoother_metrics = CheckMetrics {
             duration: smoother_duration,
             passed: smoother_result.is_ok(),
             wait_duration: smoother_result.as_ref().err().map(|not_until| {
@@ -116,11 +126,14 @@ impl OriginRateLimiter {
         };
 
         let mut policy_results = Vec::new();
+        let mut policy_states = Vec::new();
         for (name, slot) in &self.slots {
             let policy_start = Instant::now();
             let policy_result = slot.check();
             let policy_duration = policy_start.elapsed();
+            let policy_state = slot.state();
 
+            policy_states.push((name.clone(), policy_state));
             policy_results.push((
                 name.clone(),
                 CheckMetrics {
@@ -155,8 +168,10 @@ impl OriginRateLimiter {
 
         let last_result = LastCheckResult {
             timestamp: Instant::now(),
-            smoother: Some(smoother_check),
-            policies: policy_results,
+            smoother_state: Some(smoother_state),
+            policy_states,
+            smoother_metrics: Some(smoother_metrics),
+            policy_metrics: policy_results,
             total_duration,
             all_passed,
             limiting_policy,
@@ -190,45 +205,33 @@ impl OriginRateLimiter {
     
     /// Get state snapshot for telemetry
     pub fn state(&self) -> OriginRateLimiterState {
-        let smoother_state = self.smoother.state();
+        self.historical_state()
+            .unwrap_or_else(|| self.fresh_state())
+    }
 
-        let policy_states: Vec<PolicySlotState> = self.slots
-            .values()
-            .map(|slot| slot.state())
-            .collect();
+    /// Get fresh current state (always calls governor, no caching)
+    pub fn fresh_state(&self) -> OriginRateLimiterState {
+        let _ = self.check();
+        self.state()
+    }
 
-        let last_check = self.last_check_result.read().unwrap().clone();
-        let (will_throttle, _limiting_policy) = match &last_check {
-            Some(result) => (
-                !result.all_passed,
-                result.limiting_policy.clone(),
-            ),
-            None => {
-                let check_result = self.check();
-                (
-                    check_result.is_err(),
-                    check_result.err().and_then(|violation| match violation {
-                        RateLimitViolation::Smoothed { .. } => None,
-                        RateLimitViolation::PolicyExceeded { policy_name, .. } => Some(policy_name),
-                    }),
-                )
-            }
-        };
+    /// Get historical state from last check (no governor calls)
+    pub fn historical_state(&self) -> Option<OriginRateLimiterState> {
+        let last_check = self.last_check_result.read().unwrap().clone()?;
 
-        OriginRateLimiterState {
-            smoother: Some(smoother_state),
-            policies: policy_states,
-            will_throttle,
-            throttle_wait_duration: last_check.as_ref().and_then(|r| {
-                if !r.all_passed {
-                    r.smoother.as_ref().and_then(|s| s.wait_duration)
-                        .or_else(|| r.policies.iter().find_map(|(_, p)| p.wait_duration))
-                } else {
-                    None
-                }
-            }),
-            last_check,
-        }
+        Some(OriginRateLimiterState {
+            smoother: last_check.smoother_state.clone(),
+            policies: last_check.policy_states.iter().map(|(_, s)| s.clone()).collect(),
+            will_throttle: !last_check.all_passed,
+            throttle_wait_duration: if !last_check.all_passed {
+                last_check.smoother_metrics.as_ref().and_then(|s| s.wait_duration)
+                    .or_else(|| last_check.policy_metrics.iter().find_map(|(_, p)| p.wait_duration))
+            } else {
+                None
+            },
+            last_check: Some(last_check.clone()),
+            mode: StateMode::Historical,
+        })
     }
 
     pub fn last_check_result(&self) -> Option<LastCheckResult> {
@@ -410,5 +413,85 @@ mod tests {
 
         limiter.update_policies(policies);
         assert!(limiter.check().is_ok());
+    }
+
+    #[test]
+    fn test_state_capture_during_check() {
+        let mut limiter = OriginRateLimiter::new(SmootherConfig::default());
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        limiter.check();
+        let state = limiter.historical_state().unwrap();
+
+        assert!(state.smoother.is_some());
+        assert_eq!(state.policies.len(), 1);
+        assert_eq!(state.mode, StateMode::Historical);
+        assert!(state.last_check.is_some());
+        assert_eq!(state.last_check.as_ref().unwrap().all_passed, true);
+    }
+
+    #[test]
+    fn test_fresh_state_fetches_current() {
+        let mut limiter = OriginRateLimiter::new(SmootherConfig::default());
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        limiter.check();
+        let state1 = limiter.historical_state().unwrap();
+        let remaining1 = state1.policies[0].remaining;
+
+        limiter.check();
+        let state2 = limiter.historical_state().unwrap();
+        let remaining2 = state2.policies[0].remaining;
+
+        assert!(remaining2 < remaining1);
+    }
+
+    #[test]
+    fn test_state_uses_historical_by_default() {
+        let mut limiter = OriginRateLimiter::new(SmootherConfig::default());
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        limiter.check();
+        let state = limiter.state();
+
+        assert_eq!(state.mode, StateMode::Historical);
+        assert!(state.last_check.is_some());
+    }
+
+    #[test]
+    fn test_check_captures_metrics_with_timing() {
+        let mut limiter = OriginRateLimiter::new(SmootherConfig::default());
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        limiter.check();
+        let last_check = limiter.last_check_result().unwrap();
+
+        assert!(last_check.smoother_metrics.is_some());
+        assert_eq!(last_check.policy_metrics.len(), 1);
+        assert!(last_check.total_duration.as_nanos() > 0);
     }
 }
