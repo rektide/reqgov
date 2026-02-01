@@ -140,6 +140,25 @@ impl SpanEnricher for StandardSpanEnricher {
         if let Some(ref policy) = context.limiting_policy {
             span.record("rate_limit.limiting_policy", policy);
         }
+        
+        for (name, state) in &context.extensions.policy_states {
+            let remaining_key = format!("rate_limit.policy.{}.remaining", name);
+            span.record(remaining_key.as_str(), state.remaining);
+            let quota_key = format!("rate_limit.policy.{}.quota", name);
+            span.record(quota_key.as_str(), state.quota);
+        }
+    }
+}
+
+pub struct SmootherEnricher;
+
+impl SpanEnricher for SmootherEnricher {
+    fn enrich(&self, span: &Span, context: &SpanContext) {
+        if let Some(ref smoother_state) = context.extensions.smoother_state {
+            span.record("rate_limit.smoother.remaining_per_interval", smoother_state.remaining_per_interval);
+            span.record("rate_limit.smoother.micro_interval_secs", smoother_state.micro_interval_secs);
+            span.record("rate_limit.smoother.velocity", smoother_state.velocity);
+        }
     }
 }
 
@@ -159,13 +178,8 @@ impl SpanEnricher for DetailedSpanEnricher {
         
         if let Some(ref smoother_state) = context.extensions.smoother_state {
             span.record("rate_limit.smoother.remaining_per_interval", smoother_state.remaining_per_interval);
-        }
-        
-        for (name, state) in &context.extensions.policy_states {
-            let remaining_key = format!("rate_limit.policy.{}.remaining", name);
-            span.record(remaining_key.as_str(), state.remaining);
-            let quota_key = format!("rate_limit.policy.{}.quota", name);
-            span.record(quota_key.as_str(), state.quota);
+            span.record("rate_limit.smoother.micro_interval_secs", smoother_state.micro_interval_secs);
+            span.record("rate_limit.smoother.velocity", smoother_state.velocity);
         }
     }
 }
