@@ -616,6 +616,34 @@ impl Middleware for PerLimiterTraceMiddleware {
 - [ ] Documentation updated with trait-based design
 - [ ] Migration guide provided
 
+## Implementation Changes (Completed)
+
+### What was implemented:
+1. Renamed `LastCheckResult` → `SpanContext`
+2. Added `SpanMetadata` struct with timestamp, duration, mode
+3. Added `SpanExtensions` struct with HashMap for flexible attributes
+4. Added `AttributeValue` enum (Bool, U64, I64, Str, Float, Duration)
+5. Created `SpanEnricher` trait with `enrich()` and `is_enabled()` methods
+6. Implemented 3 built-in enrichers:
+   - `MinimalSpanEnricher`: Records `rate_limit: allowed/blocked`
+   - `StandardSpanEnricher`: Records pass/fail, duration, limiting policy
+   - `DetailedSpanEnricher`: Records full state snapshots with governor data
+7. Added `span_enricher` field to `OriginRateLimiter` with trait object
+8. Added `with_span_enricher()` constructor for custom enrichers
+9. Updated `check()` to build `SpanContext` with extensions
+10. Updated `historical_state()` and `state()` to use `span_context`
+11. Added `SpanExtensions::new()` and `set()` methods
+12. Implemented `From` conversions for `AttributeValue` from common types
+13. Added 2 new tests for span enrichers
+14. Fixed compatibility with tracing `Span::record()` (used `as_str()` for String parameters)
+
+### Files modified:
+- `src/origin_limiter.rs` - All changes above
+
+### Tests status:
+- All 59 tests passing (44 unit + 6 integration + 1 integration_test + 5 mod + 4 tracing_integration = 60 total)
+- Note: 1 doc test ignored, 1 doc test unrelated to changes
+
 ## Related Work
 
 - **PLAN-metrics-eager.md**: Eager state capture during check()
