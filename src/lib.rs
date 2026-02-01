@@ -17,10 +17,6 @@ pub use parsing::{parse_limit_header, parse_policy_header};
 pub use policies::{Policy, QuotaUnit, ServiceLimit};
 pub use policies::slot::{PolicySlot, PolicySlotState};
 pub use smoothing::{Smoother, SmootherConfig, SmootherState};
-pub use tracing::legacy::{
-    DetailedSpanBackend, MinimalSpanBackend, NoOpSpanBackend,
-    RateLimitSpanBackend, RateLimitState, StandardSpanBackend,
-};
 pub use tracing::middleware::{ConcurrencyTelemetry, RateLimitTelemetry};
 pub use tracing::enricher::{
     SpanEnricher, MinimalSpanEnricher, StandardSpanEnricher,

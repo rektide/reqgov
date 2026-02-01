@@ -2,6 +2,7 @@ use super::enricher_trait::SpanEnricher;
 use crate::limiter::context::SpanContext;
 use tracing::Span;
 
+#[derive(Debug, Clone, Copy, Default)]
 pub struct DetailedSpanEnricher;
 
 impl SpanEnricher for DetailedSpanEnricher {

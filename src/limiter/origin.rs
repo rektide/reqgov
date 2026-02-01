@@ -503,7 +503,7 @@ mod tests {
         }]);
 
         limiter.check();
-        let span_context = limiter.span_context().unwrap();
+        let _span_context = limiter.span_context().unwrap();
         let enricher = crate::tracing::enricher::standard::StandardSpanEnricher;
 
         assert!(enricher.is_enabled());
@@ -677,11 +677,12 @@ mod tests {
         }]);
 
         limiter.check();
-        let span_context = limiter.span_context().unwrap();
+        let _span_context = limiter.span_context().unwrap();
         let enricher = crate::tracing::enricher::concurrency::ConcurrencySpanEnricher;
 
         assert!(enricher.is_enabled());
     }
+}
 
     #[test]
     fn test_enricher_presets_concurrency() {

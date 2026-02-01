@@ -1,15 +1,15 @@
+pub mod chain;
+pub mod concurrency;
+pub mod detailed;
 pub mod enricher_trait;
 pub mod minimal;
-pub mod standard;
 pub mod smoother;
-pub mod detailed;
-pub mod concurrency;
-pub mod chain;
+pub mod standard;
 
+pub use chain::*;
+pub use concurrency::*;
+pub use detailed::*;
 pub use enricher_trait::*;
 pub use minimal::*;
-pub use standard::*;
 pub use smoother::*;
-pub use detailed::*;
-pub use concurrency::*;
-pub use chain::*;
+pub use standard::*;
