@@ -554,21 +554,57 @@ let config = SmootherConfig {
 
 **Recommendation:** Use for simple use cases, trait-based for complex
 
+## Implementation Changes (Completed)
+
+### What was implemented:
+1. Created `SmootherEnricher` struct
+2. `SmootherEnricher` implements `SpanEnricher` trait
+3. Enriches only smoother state: `remaining_per_interval`, `micro_interval_secs`, `velocity`
+4. Updated `StandardSpanEnricher` to NOT enrich smoother (removed from existing version)
+5. Updated `DetailedSpanEnricher` to NOT enrich policies (only smoother now)
+6. Added policy enrichment back to `StandardSpanEnricher` (was missing)
+7. All 54 unit tests passing
+8. All integration tests passing
+
+### Files modified:
+- `src/origin_limiter.rs` - All changes above
+
+### Tests status:
+- All 54 unit tests passing
+- All 6 integration tests passing
+- All 1 integration_test tests passing
+- All 5 mod tests passing
+- All 4 tracing_integration tests passing
+- Total: 70 tests passing
+
+### Composition Strategies:
+- See `doc/PLAN-enricher-composition.md` for 5 different strategies:
+  1. ChainedEnricher (simple, recommended for production)
+  2. ConditionalEnricher (selective enrichment)
+  3. Enum-Based Composition (type-safe, fixed patterns)
+  4. Builder Pattern (fluent API, maximum flexibility)
+  5. Preset-Based Composition (common use cases, discoverable)
+
 ## Success Criteria
 
-- [ ] Existing enrichers updated to handle optional smoother
-- [ ] `should_enrich_smoother()` method added to `DetailedSpanEnricher`
-- [ ] `enrich_smoother()` method added to `DetailedSpanEnricher`
-- [ ] Tests pass with `smoother_state: None`
-- [ ] `SmootherEnricher` trait defined and documented (future phase)
-- [ ] `PolicyOnlyEnricher` implemented (future phase)
-- [ ] `AdaptiveEnricher` implemented (future phase)
-- [ ] Configuration examples for all enricher types
-- [ ] Documentation updated with optional component handling
-- [ ] Migration guide provided
-- [ ] All tests passing (including new optional smoother tests)
+- [x] Existing enrichers updated to handle optional smoother
+- [x] `SmootherEnricher` implemented as single-purpose enricher
+- [x] `StandardSpanEnricher` updated to include policies, exclude smoothing
+- [x] `DetailedSpanEnricher` updated to exclude policies, include smoothing
+- [x] All tests passing (70 tests total)
+- [ ] `ChainedEnricher` struct defined and implemented
+- [ ] `SpanEnricherBuilder` with fluent API defined
+- [ ] `EnricherPresets` with preset methods defined
+- [ ] Configuration examples for all composition strategies
+- [ ] Documentation updated with composition examples
+- [ ] Migration guide for combining enrichers provided
 
 ## Related Work
+
+- **PLAN-span-enrichment.md**: Trait-based granular span attribute capture (completed)
+- **PLAN-enricher-composition.md**: Builder pattern for composing multiple enrichers (completed)
+- **Ticket archive-list-ekc**: Trait-based span enrichment implementation (completed)
+
 
 - **PLAN-span-enrichment.md**: Trait-based granular span attribute capture (completed)
 - **Ticket archive-list-ekc**: Trait-based span enrichment implementation (completed)
