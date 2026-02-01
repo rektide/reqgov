@@ -65,10 +65,37 @@ impl reqwest_ratelimit::RateLimiter for HttpApiRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest_ratelimit::RateLimiter;
 
     #[test]
     fn test_limiter_creation() {
         let config = SmootherConfig::default();
         let _limiter = HttpApiRateLimiter::new(config);
+    }
+
+    #[test]
+    fn test_limiter_with_concurrency_limits() {
+        let config = SmootherConfig::default();
+        let limiter = HttpApiRateLimiter::with_concurrency_limits(config, Some(100), Some(10));
+        assert_eq!(limiter.registry().max_concurrent_global(), Some(100));
+        assert_eq!(limiter.registry().max_concurrent_per_domain(), Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_limiter_acquire_permit() {
+        let config = SmootherConfig::default();
+        let limiter = Arc::new(HttpApiRateLimiter::new(config));
+
+        let url = url::Url::parse("https://api.example.com/test").unwrap();
+        limiter.set_url(url).await;
+
+        limiter.acquire_permit().await;
+    }
+
+    #[tokio::test]
+    async fn test_limiter_registry_access() {
+        let config = SmootherConfig::default();
+        let limiter = HttpApiRateLimiter::new(config);
+        let _registry = limiter.registry();
     }
 }

@@ -475,6 +475,7 @@ impl OriginRateLimiter {
             smoother_state,
             policy_states,
             attributes: HashMap::new(),
+            concurrency: ConcurrencyMetrics::default(),
         };
 
         let span_context = SpanContext {

@@ -16,7 +16,7 @@ pub use policy::{Policy, QuotaUnit, ServiceLimit};
 pub use policy_slot::{PolicySlot, PolicySlotState};
 pub use smoother::{Smoother, SmootherConfig, SmootherState};
 pub use tracing::{
-    DetailedSpanBackend, MinimalSpanBackend, NoOpSpanBackend, RateLimitSpanBackend,
-    RateLimitState, StandardSpanBackend,
+    ConcurrencyState, DetailedSpanBackend, MinimalSpanBackend, NoOpSpanBackend,
+    RateLimitSpanBackend, RateLimitState, StandardSpanBackend,
 };
-pub use tracing_middleware::RateLimitTelemetry;
+pub use tracing_middleware::{ConcurrencyTelemetry, RateLimitTelemetry};

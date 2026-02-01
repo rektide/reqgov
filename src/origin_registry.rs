@@ -11,7 +11,7 @@ pub struct OriginRegistry {
     limiters: Arc<RwLock<HashMap<String, Arc<RwLock<OriginRateLimiter>>>>>,
     smoother_config: SmootherConfig,
     global_semaphore: Arc<Semaphore>,
-    per_domain_semaphores: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>>,
+    per_domain_semaphores: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
     max_concurrent_global: Option<usize>,
     max_concurrent_per_domain: Option<usize>,
 }
@@ -21,7 +21,7 @@ impl OriginRegistry {
         Self {
             limiters: Arc::new(RwLock::new(HashMap::new())),
             smoother_config,
-            global_semaphore: Arc::new(Semaphore::new(usize::MAX)),
+            global_semaphore: Arc::new(Semaphore::new(i32::MAX as usize)),
             per_domain_semaphores: Arc::new(RwLock::new(HashMap::new())),
             max_concurrent_global: None,
             max_concurrent_per_domain: None,
@@ -33,7 +33,7 @@ impl OriginRegistry {
         max_concurrent_global: Option<usize>,
         max_concurrent_per_domain: Option<usize>,
     ) -> Self {
-        let global_permits = max_concurrent_global.unwrap_or(usize::MAX);
+        let global_permits = max_concurrent_global.unwrap_or(i32::MAX as usize);
         Self {
             limiters: Arc::new(RwLock::new(HashMap::new())),
             smoother_config,
@@ -86,7 +86,7 @@ impl OriginRegistry {
         }
 
         let mut semaphores = self.per_domain_semaphores.write().await;
-        let permits = self.max_concurrent_per_domain.unwrap_or(usize::MAX);
+        let permits = self.max_concurrent_per_domain.unwrap_or(i32::MAX as usize);
         semaphores
             .entry(key)
             .or_insert_with(|| Arc::new(Semaphore::new(permits)))
@@ -132,5 +132,42 @@ mod tests {
         let registry = OriginRegistry::new(config);
         let url = Url::parse("https://api.example.com/test").unwrap();
         let _limiter = registry.get_limiter(&url).await;
+    }
+
+    #[tokio::test]
+    async fn test_registry_with_concurrency_limits() {
+        let config = SmootherConfig::default();
+        let registry = OriginRegistry::with_concurrency_limits(config, Some(100), Some(10));
+        assert_eq!(registry.max_concurrent_global(), Some(100));
+        assert_eq!(registry.max_concurrent_per_domain(), Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_get_global_semaphore() {
+        let config = SmootherConfig::default();
+        let registry = OriginRegistry::with_concurrency_limits(config, Some(5), None);
+        let semaphore = registry.get_global_semaphore().await;
+
+        let _permit1 = semaphore.acquire().await.unwrap();
+        let _permit2 = semaphore.acquire().await.unwrap();
+        let _permit3 = semaphore.acquire().await.unwrap();
+
+        // Should be able to acquire 5 permits total
+        let _permit4 = semaphore.acquire().await.unwrap();
+        let _permit5 = semaphore.acquire().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_domain_semaphore() {
+        let config = SmootherConfig::default();
+        let registry = OriginRegistry::with_concurrency_limits(config, None, Some(3));
+        let url = Url::parse("https://api.example.com/test").unwrap();
+        let semaphore = registry.get_domain_semaphore(&url).await;
+
+        let _permit1 = semaphore.acquire().await.unwrap();
+        let _permit2 = semaphore.acquire().await.unwrap();
+        let _permit3 = semaphore.acquire().await.unwrap();
+
+        // Should be able to acquire 3 permits for this domain
     }
 }
