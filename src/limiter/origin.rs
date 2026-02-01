@@ -1,327 +1,13 @@
-use crate::policy::{Policy, ServiceLimit};
-use crate::policy_slot::{PolicySlot, PolicySlotState};
-use crate::smoother::{Smoother, SmootherConfig, SmootherState};
+use crate::limiter::context::{CheckMetrics, SpanContext, SpanExtensions, StateMode};
+use crate::limiter::state::RateLimitViolation;
+use crate::policies::policy::Policy;
+use crate::policies::slot::PolicySlot;
+use crate::smoothing::smoother::Smoother;
+use crate::tracing::enricher::enricher_trait::SpanEnricher;
 use governor::clock::Clock;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tracing::Span;
-
-#[derive(Debug, Clone)]
-pub struct CheckMetrics {
-    pub duration: Duration,
-    pub passed: bool,
-    pub wait_duration: Option<Duration>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StateMode {
-    Historical,
-    Fresh,
-}
-
-#[derive(Debug, Clone)]
-pub struct SpanMetadata {
-    pub timestamp: Instant,
-    pub duration: Duration,
-    pub mode: StateMode,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ConcurrencyMetrics {
-    pub global_active: Option<usize>,
-    pub global_max: Option<usize>,
-    pub domain_active: Option<usize>,
-    pub domain_max: Option<usize>,
-    pub wait_duration: Option<Duration>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SpanExtensions {
-    pub smoother_state: Option<SmootherState>,
-    pub policy_states: Vec<(String, PolicySlotState)>,
-    pub attributes: HashMap<&'static str, AttributeValue>,
-    pub concurrency: ConcurrencyMetrics,
-}
-
-impl SpanExtensions {
-    pub fn new() -> Self {
-        Self {
-            smoother_state: None,
-            policy_states: Vec::new(),
-            attributes: HashMap::new(),
-            concurrency: ConcurrencyMetrics::default(),
-        }
-    }
-
-    pub fn set(&mut self, key: &'static str, value: AttributeValue) {
-        self.attributes.insert(key, value);
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum AttributeValue {
-    Bool(bool),
-    U64(u64),
-    I64(i64),
-    Str(String),
-    Float(f64),
-    Duration(Duration),
-}
-
-impl From<bool> for AttributeValue {
-    fn from(value: bool) -> Self {
-        AttributeValue::Bool(value)
-    }
-}
-
-impl From<u64> for AttributeValue {
-    fn from(value: u64) -> Self {
-        AttributeValue::U64(value)
-    }
-}
-
-impl From<i64> for AttributeValue {
-    fn from(value: i64) -> Self {
-        AttributeValue::I64(value)
-    }
-}
-
-impl From<String> for AttributeValue {
-    fn from(value: String) -> Self {
-        AttributeValue::Str(value)
-    }
-}
-
-impl From<&str> for AttributeValue {
-    fn from(value: &str) -> Self {
-        AttributeValue::Str(value.to_string())
-    }
-}
-
-impl From<f64> for AttributeValue {
-    fn from(value: f64) -> Self {
-        AttributeValue::Float(value)
-    }
-}
-
-impl From<Duration> for AttributeValue {
-    fn from(value: Duration) -> Self {
-        AttributeValue::Duration(value)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SpanContext {
-    pub all_passed: bool,
-    pub limiting_policy: Option<String>,
-    pub total_duration: Duration,
-    pub smoother_metrics: Option<CheckMetrics>,
-    pub policy_metrics: Vec<(String, CheckMetrics)>,
-    pub extensions: SpanExtensions,
-    pub metadata: SpanMetadata,
-}
-
-pub trait SpanEnricher: Send + Sync {
-    fn enrich(&self, span: &Span, context: &SpanContext);
-    fn is_enabled(&self) -> bool {
-        true
-    }
-}
-
-pub struct MinimalSpanEnricher;
-
-impl SpanEnricher for MinimalSpanEnricher {
-    fn enrich(&self, span: &Span, context: &SpanContext) {
-        if context.all_passed {
-            span.record("rate_limit", "allowed");
-        } else {
-            span.record("rate_limit", "blocked");
-        }
-    }
-}
-
-pub struct StandardSpanEnricher;
-
-impl SpanEnricher for StandardSpanEnricher {
-    fn enrich(&self, span: &Span, context: &SpanContext) {
-        span.record("rate_limit.allowed", context.all_passed);
-        span.record("rate_limit.duration_ms", context.total_duration.as_millis());
-        
-        if let Some(ref policy) = context.limiting_policy {
-            span.record("rate_limit.limiting_policy", policy);
-        }
-        
-        for (name, state) in &context.extensions.policy_states {
-            let remaining_key = format!("rate_limit.policy.{}.remaining", name);
-            span.record(remaining_key.as_str(), state.remaining);
-            let quota_key = format!("rate_limit.policy.{}.quota", name);
-            span.record(quota_key.as_str(), state.quota);
-        }
-    }
-}
-
-pub struct SmootherEnricher;
-
-impl SpanEnricher for SmootherEnricher {
-    fn enrich(&self, span: &Span, context: &SpanContext) {
-        if let Some(ref smoother_state) = context.extensions.smoother_state {
-            span.record("rate_limit.smoother.remaining_per_interval", smoother_state.remaining_per_interval);
-            span.record("rate_limit.smoother.micro_interval_secs", smoother_state.micro_interval_secs);
-            span.record("rate_limit.smoother.velocity", smoother_state.velocity);
-        }
-    }
-}
-
-pub struct ChainedEnricher {
-    enrichers: Vec<Arc<dyn SpanEnricher + Send + Sync>>,
-}
-
-impl SpanEnricher for ChainedEnricher {
-    fn enrich(&self, span: &Span, context: &SpanContext) {
-        for enricher in &self.enrichers {
-            if enricher.is_enabled() {
-                enricher.enrich(span, context);
-            }
-        }
-    }
-}
-
-impl ChainedEnricher {
-    pub fn new() -> Self {
-        Self {
-            enrichers: Vec::new(),
-        }
-    }
-
-    pub fn with_enricher<E: SpanEnricher + 'static>(mut self, enricher: E) -> Self {
-        self.enrichers.push(Arc::new(enricher));
-        self
-    }
-
-    pub fn with_enrichers<E: SpanEnricher + 'static>(mut self, enrichers: Vec<E>) -> Self {
-        for enricher in enrichers {
-            self.enrichers.push(Arc::new(enricher));
-        }
-        self
-    }
-
-    pub fn with_dyn_enrichers(mut self, enrichers: Vec<Arc<dyn SpanEnricher + Send + Sync>>) -> Self {
-        for enricher in enrichers {
-            self.enrichers.push(enricher);
-        }
-        self
-    }
-
-    pub fn build(self) -> Box<dyn SpanEnricher + Send + Sync> {
-        Box::new(self)
-    }
-}
-
-pub struct EnricherPresets;
-
-impl EnricherPresets {
-    pub fn minimal() -> Box<dyn SpanEnricher + Send + Sync> {
-        Box::new(MinimalSpanEnricher)
-    }
-
-    pub fn standard() -> Box<dyn SpanEnricher + Send + Sync> {
-        Box::new(StandardSpanEnricher)
-    }
-
-    pub fn detailed() -> Box<dyn SpanEnricher + Send + Sync> {
-        Box::new(DetailedSpanEnricher)
-    }
-
-    pub fn production() -> Box<dyn SpanEnricher + Send + Sync> {
-        ChainedEnricher::new()
-            .with_enricher(SmootherEnricher)
-            .with_enricher(StandardSpanEnricher)
-            .build()
-    }
-
-    pub fn debug() -> Box<dyn SpanEnricher + Send + Sync> {
-        ChainedEnricher::new()
-            .with_enricher(SmootherEnricher)
-            .with_enricher(DetailedSpanEnricher)
-            .build()
-    }
-
-    pub fn custom(enrichers: Vec<Arc<dyn SpanEnricher + Send + Sync>>) -> Box<dyn SpanEnricher + Send + Sync> {
-        ChainedEnricher::new()
-            .with_dyn_enrichers(enrichers)
-            .build()
-    }
-
-    pub fn concurrency() -> Box<dyn SpanEnricher + Send + Sync> {
-        Box::new(ConcurrencySpanEnricher)
-    }
-}
-
-pub struct DetailedSpanEnricher;
-
-impl SpanEnricher for DetailedSpanEnricher {
-    fn enrich(&self, span: &Span, context: &SpanContext) {
-        let mode_str = format!("{:?}", context.metadata.mode);
-        span.record("rate_limit.mode", mode_str);
-        span.record("rate_limit.all_passed", context.all_passed);
-        span.record("rate_limit.duration_ms", context.total_duration.as_millis());
-        span.record("rate_limit.timestamp_ms", context.metadata.timestamp.elapsed().as_millis());
-        
-        if let Some(ref policy) = context.limiting_policy {
-            span.record("rate_limit.limiting_policy", policy.as_str());
-        }
-        
-        if let Some(ref smoother_state) = context.extensions.smoother_state {
-            span.record("rate_limit.smoother.remaining_per_interval", smoother_state.remaining_per_interval);
-            span.record("rate_limit.smoother.micro_interval_secs", smoother_state.micro_interval_secs);
-            span.record("rate_limit.smoother.velocity", smoother_state.velocity);
-        }
-    }
-}
-
-pub struct ConcurrencySpanEnricher;
-
-impl SpanEnricher for ConcurrencySpanEnricher {
-    fn enrich(&self, span: &Span, context: &SpanContext) {
-        let concurrency = &context.extensions.concurrency;
-
-        if let Some(global_max) = concurrency.global_max {
-            span.record("rate_limit.concurrent.global.max", global_max);
-        }
-
-        if let Some(domain_max) = concurrency.domain_max {
-            span.record("rate_limit.concurrent.domain.max", domain_max);
-        }
-
-        if let Some(wait_duration) = concurrency.wait_duration {
-            span.record("rate_limit.concurrent.wait_ms", wait_duration.as_millis());
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum RateLimitViolation {
-    Smoothed { wait_duration: Duration },
-    PolicyExceeded { policy_name: String, wait_duration: Duration },
-}
-
-/// State snapshot for telemetry
-#[derive(Debug, Clone)]
-pub struct OriginRateLimiterState {
-    pub smoother: Option<SmootherState>,
-    pub policies: Vec<PolicySlotState>,
-    pub will_throttle: bool,
-    pub throttle_wait_duration: Option<Duration>,
-    pub span_context: Option<SpanContext>,
-    pub mode: StateMode,
-}
-
-impl OriginRateLimiterState {
-    pub fn limiting_policy(&self) -> Option<&str> {
-        self.span_context.as_ref().and_then(|r| r.limiting_policy.as_deref())
-    }
-}
 
 pub struct OriginRateLimiter {
     slots: HashMap<String, PolicySlot>,
@@ -338,17 +24,17 @@ impl OriginRateLimiter {
             smoother: None,
             fastest_policy: None,
             span_context: Arc::new(RwLock::new(None)),
-            span_enricher: Arc::new(StandardSpanEnricher),
+            span_enricher: Arc::new(crate::tracing::enricher::standard::StandardSpanEnricher),
         }
     }
 
-    pub fn with_smoother(smoother_config: SmootherConfig) -> Self {
+    pub fn with_smoother(smoother_config: crate::smoothing::smoother::SmootherConfig) -> Self {
         Self {
             slots: HashMap::new(),
             smoother: Some(Smoother::new(smoother_config)),
             fastest_policy: None,
             span_context: Arc::new(RwLock::new(None)),
-            span_enricher: Arc::new(StandardSpanEnricher),
+            span_enricher: Arc::new(crate::tracing::enricher::standard::StandardSpanEnricher),
         }
     }
 
@@ -362,7 +48,7 @@ impl OriginRateLimiter {
         }
     }
 
-    pub fn with_smoother_and_span_enricher(smoother_config: SmootherConfig, enricher: Arc<dyn SpanEnricher + Send + Sync>) -> Self {
+    pub fn with_smoother_and_span_enricher(smoother_config: crate::smoothing::smoother::SmootherConfig, enricher: Arc<dyn SpanEnricher + Send + Sync>) -> Self {
         Self {
             slots: HashMap::new(),
             smoother: Some(Smoother::new(smoother_config)),
@@ -383,7 +69,7 @@ impl OriginRateLimiter {
         self.recalculate_fastest();
     }
 
-    pub fn update_limits(&mut self, limits: Vec<ServiceLimit>) {
+    pub fn update_limits(&mut self, limits: Vec<crate::policies::policy::ServiceLimit>) {
         for limit in limits {
             if let Some(slot) = self.slots.get_mut(&limit.name) {
                 slot.update(&limit);
@@ -479,7 +165,7 @@ impl OriginRateLimiter {
             smoother_state,
             policy_states,
             attributes: HashMap::new(),
-            concurrency: ConcurrencyMetrics::default(),
+            concurrency: crate::limiter::context::ConcurrencyMetrics::default(),
         };
 
         let span_context = SpanContext {
@@ -489,7 +175,7 @@ impl OriginRateLimiter {
             smoother_metrics,
             policy_metrics: policy_results,
             extensions,
-            metadata: SpanMetadata {
+            metadata: crate::limiter::context::SpanMetadata {
                 timestamp: Instant::now(),
                 duration: total_duration,
                 mode: StateMode::Historical,
@@ -524,23 +210,20 @@ impl OriginRateLimiter {
         }
     }
     
-    /// Get state snapshot for telemetry
-    pub fn state(&self) -> OriginRateLimiterState {
+    pub fn state(&self) -> crate::limiter::state::OriginRateLimiterState {
         self.historical_state()
             .unwrap_or_else(|| self.fresh_state())
     }
 
-    /// Get fresh current state (always calls governor, no caching)
-    pub fn fresh_state(&self) -> OriginRateLimiterState {
+    pub fn fresh_state(&self) -> crate::limiter::state::OriginRateLimiterState {
         let _ = self.check();
         self.state()
     }
 
-    /// Get historical state from last check (no governor calls)
-    pub fn historical_state(&self) -> Option<OriginRateLimiterState> {
+    pub fn historical_state(&self) -> Option<crate::limiter::state::OriginRateLimiterState> {
         let span_context = self.span_context.read().unwrap().clone()?;
 
-        Some(OriginRateLimiterState {
+        Some(crate::limiter::state::OriginRateLimiterState {
             smoother: span_context.extensions.smoother_state.clone(),
             policies: span_context.extensions.policy_states.iter().map(|(_, s)| s.clone()).collect(),
             will_throttle: !span_context.all_passed,
@@ -574,11 +257,11 @@ mod tests {
     fn test_update_policies() {
         let mut limiter = OriginRateLimiter::new();
 
-        let policies = vec![Policy {
+        let policies = vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }];
 
@@ -591,18 +274,18 @@ mod tests {
         let mut limiter = OriginRateLimiter::new();
 
         let policies = vec![
-            Policy {
+            crate::policies::policy::Policy {
                 name: "burst".to_string(),
                 quota: 100,
                 window_secs: Some(60),
-                quota_unit: crate::policy::QuotaUnit::Requests,
+                quota_unit: crate::policies::policy::QuotaUnit::Requests,
                 partition_key: None,
             },
-            Policy {
+            crate::policies::policy::Policy {
                 name: "daily".to_string(),
                 quota: 10000,
                 window_secs: Some(86400),
-                quota_unit: crate::policy::QuotaUnit::Requests,
+                quota_unit: crate::policies::policy::QuotaUnit::Requests,
                 partition_key: None,
             },
         ];
@@ -615,22 +298,22 @@ mod tests {
     fn test_update_existing_policy() {
         let mut limiter = OriginRateLimiter::new();
 
-        let policies1 = vec![Policy {
+        let policies1 = vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }];
 
         limiter.update_policies(policies1);
         assert_eq!(limiter.slots["burst"].policy.quota, 100);
 
-        let policies2 = vec![Policy {
+        let policies2 = vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 200,
             window_secs: Some(120),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }];
 
@@ -644,25 +327,25 @@ mod tests {
         let mut limiter = OriginRateLimiter::new();
 
         let policies = vec![
-            Policy {
+            crate::policies::policy::Policy {
                 name: "burst".to_string(),
                 quota: 100,
                 window_secs: Some(60),
-                quota_unit: crate::policy::QuotaUnit::Requests,
+                quota_unit: crate::policies::policy::QuotaUnit::Requests,
                 partition_key: None,
             },
-            Policy {
+            crate::policies::policy::Policy {
                 name: "hourly".to_string(),
                 quota: 5000,
                 window_secs: Some(3600),
-                quota_unit: crate::policy::QuotaUnit::Requests,
+                quota_unit: crate::policies::policy::QuotaUnit::Requests,
                 partition_key: None,
             },
-            Policy {
+            crate::policies::policy::Policy {
                 name: "daily".to_string(),
                 quota: 100000,
                 window_secs: Some(86400),
-                quota_unit: crate::policy::QuotaUnit::Requests,
+                quota_unit: crate::policies::policy::QuotaUnit::Requests,
                 partition_key: None,
             },
         ];
@@ -675,11 +358,11 @@ mod tests {
     fn test_check_allows_when_quotas_available() {
         let mut limiter = OriginRateLimiter::new();
 
-        let policies = vec![Policy {
+        let policies = vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }];
 
@@ -691,17 +374,17 @@ mod tests {
     fn test_update_limits() {
         let mut limiter = OriginRateLimiter::new();
 
-        let policies = vec![Policy {
+        let policies = vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }];
 
         limiter.update_policies(policies);
 
-        let limits = vec![ServiceLimit {
+        let limits = vec![crate::policies::policy::ServiceLimit {
             name: "burst".to_string(),
             remaining: 75,
             reset_secs: Some(30),
@@ -716,11 +399,11 @@ mod tests {
     fn test_check_allows_immediately_when_quotas_available() {
         let mut limiter = OriginRateLimiter::new();
 
-        let policies = vec![Policy {
+        let policies = vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }];
 
@@ -730,12 +413,12 @@ mod tests {
 
     #[test]
     fn test_state_capture_during_check() {
-        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
-        limiter.update_policies(vec![Policy {
+        let mut limiter = OriginRateLimiter::with_smoother(crate::smoothing::smoother::SmootherConfig::default());
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -751,12 +434,12 @@ mod tests {
 
     #[test]
     fn test_fresh_state_fetches_current() {
-        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
-        limiter.update_policies(vec![Policy {
+        let mut limiter = OriginRateLimiter::with_smoother(crate::smoothing::smoother::SmootherConfig::default());
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -773,12 +456,12 @@ mod tests {
 
     #[test]
     fn test_state_uses_historical_by_default() {
-        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
-        limiter.update_policies(vec![Policy {
+        let mut limiter = OriginRateLimiter::with_smoother(crate::smoothing::smoother::SmootherConfig::default());
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -791,12 +474,12 @@ mod tests {
 
     #[test]
     fn test_check_captures_metrics_with_timing() {
-        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
-        limiter.update_policies(vec![Policy {
+        let mut limiter = OriginRateLimiter::with_smoother(crate::smoothing::smoother::SmootherConfig::default());
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -810,18 +493,18 @@ mod tests {
 
     #[test]
     fn test_span_enricher_standard() {
-        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
-        limiter.update_policies(vec![Policy {
+        let mut limiter = OriginRateLimiter::with_smoother(crate::smoothing::smoother::SmootherConfig::default());
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
         limiter.check();
         let span_context = limiter.span_context().unwrap();
-        let enricher = StandardSpanEnricher;
+        let enricher = crate::tracing::enricher::standard::StandardSpanEnricher;
 
         assert!(enricher.is_enabled());
     }
@@ -829,8 +512,8 @@ mod tests {
     #[test]
     fn test_span_extensions_custom_attributes() {
         let mut extensions = SpanExtensions::new();
-        extensions.set("custom.org_id", "org-123".into());
-        extensions.set("custom.region", "us-east-1".into());
+        extensions.set("custom.org_id", crate::limiter::context::AttributeValue::from("org-123"));
+        extensions.set("custom.region", crate::limiter::context::AttributeValue::from("us-east-1"));
 
         assert_eq!(extensions.attributes.len(), 2);
     }
@@ -844,7 +527,7 @@ mod tests {
 
     #[test]
     fn test_optional_smoother_with_smoother_constructor() {
-        let limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
+        let limiter = OriginRateLimiter::with_smoother(crate::smoothing::smoother::SmootherConfig::default());
         assert_eq!(limiter.slots.len(), 0);
         assert!(limiter.smoother.is_some());
     }
@@ -853,11 +536,11 @@ mod tests {
     fn test_check_without_smoother() {
         let mut limiter = OriginRateLimiter::new();
 
-        limiter.update_policies(vec![Policy {
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -867,11 +550,11 @@ mod tests {
     #[test]
     fn test_state_without_smoother() {
         let mut limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![Policy {
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -889,11 +572,11 @@ mod tests {
     #[test]
     fn test_span_context_without_smoother() {
         let mut limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![Policy {
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -908,11 +591,11 @@ mod tests {
     #[tokio::test]
     async fn test_wait_without_smoother() {
         let mut limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![Policy {
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -923,15 +606,15 @@ mod tests {
     #[test]
     fn test_reconfigure_smoother_without_smoother() {
         let mut limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![Policy {
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
-        let limits = vec![ServiceLimit {
+        let limits = vec![crate::policies::policy::ServiceLimit {
             name: "burst".to_string(),
             remaining: 75,
             reset_secs: Some(30),
@@ -944,7 +627,7 @@ mod tests {
 
     #[test]
     fn test_with_span_enricher_constructor() {
-        let limiter = OriginRateLimiter::with_span_enricher(Arc::new(MinimalSpanEnricher));
+        let limiter = OriginRateLimiter::with_span_enricher(Arc::new(crate::tracing::enricher::minimal::MinimalSpanEnricher));
         assert_eq!(limiter.slots.len(), 0);
         assert!(limiter.smoother.is_none());
     }
@@ -952,8 +635,8 @@ mod tests {
     #[test]
     fn test_with_smoother_and_span_enricher_constructor() {
         let limiter = OriginRateLimiter::with_smoother_and_span_enricher(
-            SmootherConfig::default(),
-            Arc::new(DetailedSpanEnricher)
+            crate::smoothing::smoother::SmootherConfig::default(),
+            Arc::new(crate::tracing::enricher::detailed::DetailedSpanEnricher)
         );
         assert_eq!(limiter.slots.len(), 0);
         assert!(limiter.smoother.is_some());
@@ -962,11 +645,11 @@ mod tests {
     #[test]
     fn test_limiting_policy_without_smoother() {
         let mut limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![Policy {
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 1,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -984,25 +667,25 @@ mod tests {
 
     #[test]
     fn test_concurrency_span_enricher() {
-        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
-        limiter.update_policies(vec![Policy {
+        let mut limiter = OriginRateLimiter::with_smoother(crate::smoothing::smoother::SmootherConfig::default());
+        limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         }]);
 
         limiter.check();
         let span_context = limiter.span_context().unwrap();
-        let enricher = ConcurrencySpanEnricher;
+        let enricher = crate::tracing::enricher::concurrency::ConcurrencySpanEnricher;
 
         assert!(enricher.is_enabled());
     }
 
     #[test]
     fn test_enricher_presets_concurrency() {
-        let enricher = EnricherPresets::concurrency();
+        let enricher = crate::tracing::enricher::chain::EnricherPresets::concurrency();
         assert!(enricher.is_enabled());
     }
 }

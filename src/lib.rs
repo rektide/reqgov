@@ -1,27 +1,29 @@
-mod parser;
-mod policy;
-mod policy_slot;
-mod smoother;
-mod origin_limiter;
-mod origin_registry;
+mod parsing;
+mod limiter;
+mod policies;
+mod smoothing;
+mod registry;
 mod middleware;
 mod tracing;
-mod tracing_middleware;
 
 pub use middleware::HttpApiRateLimiter;
-pub use origin_limiter::{
-    ChainedEnricher, ConcurrencySpanEnricher, ConcurrencyMetrics, DetailedSpanEnricher,
-    EnricherPresets, MinimalSpanEnricher, OriginRateLimiter, OriginRateLimiterState,
-    RateLimitViolation, SpanContext, SpanEnricher, SpanExtensions, SpanMetadata,
-    SmootherEnricher, StandardSpanEnricher,
+pub use limiter::origin::OriginRateLimiter;
+pub use limiter::state::{OriginRateLimiterState, RateLimitViolation};
+pub use limiter::context::{
+    SpanContext, SpanExtensions, SpanMetadata, ConcurrencyMetrics, CheckMetrics, StateMode, AttributeValue
 };
-pub use origin_registry::OriginRegistry;
-pub use parser::{parse_limit_header, parse_policy_header};
-pub use policy::{Policy, QuotaUnit, ServiceLimit};
-pub use policy_slot::{PolicySlot, PolicySlotState};
-pub use smoother::{Smoother, SmootherConfig, SmootherState};
-pub use tracing::{
+pub use registry::OriginRegistry;
+pub use parsing::{parse_limit_header, parse_policy_header};
+pub use policies::{Policy, QuotaUnit, ServiceLimit};
+pub use policies::slot::{PolicySlot, PolicySlotState};
+pub use smoothing::{Smoother, SmootherConfig, SmootherState};
+pub use tracing::legacy::{
     DetailedSpanBackend, MinimalSpanBackend, NoOpSpanBackend,
     RateLimitSpanBackend, RateLimitState, StandardSpanBackend,
 };
-pub use tracing_middleware::{ConcurrencyTelemetry, RateLimitTelemetry};
+pub use tracing::middleware::{ConcurrencyTelemetry, RateLimitTelemetry};
+pub use tracing::enricher::{
+    SpanEnricher, MinimalSpanEnricher, StandardSpanEnricher,
+    SmootherEnricher, DetailedSpanEnricher, ConcurrencySpanEnricher,
+    ChainedEnricher, EnricherPresets
+};

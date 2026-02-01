@@ -22,10 +22,9 @@ pub struct RateLimitState {
     pub origin: Option<String>,
 
     /// Smoother state (micro-interval pacing)
-    pub smoother: Option<crate::smoother::SmootherState>,
+    pub smoother: Option<crate::smoothing::smoother::SmootherState>,
 
-    /// All policy slot states (burst, daily, etc.)
-    pub policies: Vec<crate::policy_slot::PolicySlotState>,
+    pub policies: Vec<crate::policies::slot::PolicySlotState>,
 
     /// Overall whether rate limiting will cause a delay
     pub will_throttle: bool,

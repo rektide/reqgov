@@ -1,6 +1,6 @@
-use crate::origin_limiter::OriginRateLimiter;
-use crate::parser::{parse_limit_header, parse_policy_header};
-use crate::smoother::SmootherConfig;
+use crate::limiter::origin::OriginRateLimiter;
+use crate::parsing::headers::{parse_limit_header, parse_policy_header};
+use crate::smoothing::smoother::SmootherConfig;
 use http::HeaderMap;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -103,14 +103,13 @@ impl OriginRegistry {
 
     pub async fn update_from_response(&self, url: &Url, headers: &HeaderMap) {
         let limiter = self.get_limiter(url).await;
-        let mut limiter = limiter.write().await;
 
         if let Some(policies) = parse_policy_header(headers) {
-            limiter.update_policies(policies);
+            limiter.write().await.update_policies(policies);
         }
 
         if let Some(limits) = parse_limit_header(headers) {
-            limiter.update_limits(limits);
+            limiter.write().await.update_limits(limits);
         }
     }
 }

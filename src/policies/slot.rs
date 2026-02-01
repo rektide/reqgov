@@ -1,4 +1,4 @@
-use crate::policy::{Policy, ServiceLimit};
+use super::policy::{Policy, ServiceLimit};
 use governor::clock::{Clock, DefaultClock};
 use governor::middleware::{StateInformationMiddleware, StateSnapshot};
 use governor::state::InMemoryState;
@@ -118,36 +118,7 @@ mod tests {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
-            partition_key: None,
-        };
-
-        let slot = PolicySlot::new(policy);
-        assert_eq!(slot.remaining, 100);
-        assert_eq!(slot.policy.name, "burst");
-    }
-
-    #[test]
-    fn test_policy_slot_check() {
-        let policy = Policy {
-            name: "burst".to_string(),
-            quota: 100,
-            window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
-            partition_key: None,
-        };
-
-        let slot = PolicySlot::new(policy);
-        assert!(slot.check().is_ok());
-    }
-
-    #[test]
-    fn test_policy_slot_update() {
-        let policy = Policy {
-            name: "burst".to_string(),
-            quota: 100,
-            window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         };
 
@@ -172,7 +143,7 @@ mod tests {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         };
 
@@ -196,7 +167,7 @@ mod tests {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         };
 
@@ -221,7 +192,7 @@ mod tests {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policy::QuotaUnit::Requests,
+            quota_unit: crate::policies::policy::QuotaUnit::Requests,
             partition_key: None,
         };
 

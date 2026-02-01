@@ -53,9 +53,9 @@
 /// - `reqwest-ratelimit` - for reqwest_ratelimit::all
 /// ```
 
-use crate::middleware::HttpApiRateLimiter;
-use crate::origin_limiter::OriginRateLimiter;
-use crate::tracing::{RateLimitSpanBackend, RateLimitState};
+use crate::middleware::http::HttpApiRateLimiter;
+use crate::limiter::origin::OriginRateLimiter;
+use crate::tracing::legacy::{RateLimitSpanBackend, RateLimitState};
 use http::Extensions;
 use reqwest_middleware::{Middleware, Next, Result};
 use std::sync::Arc;
@@ -102,19 +102,19 @@ impl<S: RateLimitSpanBackend> RateLimitTelemetry<S> {
 }
 
 // Convenience constructors for common span backends
-impl RateLimitTelemetry<crate::tracing::MinimalSpanBackend> {
+impl RateLimitTelemetry<crate::tracing::legacy::MinimalSpanBackend> {
     pub fn new_minimal(rate_limiter: Arc<OriginRateLimiter>) -> Self {
         Self::new(rate_limiter)
     }
 }
 
-impl RateLimitTelemetry<crate::tracing::StandardSpanBackend> {
+impl RateLimitTelemetry<crate::tracing::legacy::StandardSpanBackend> {
     pub fn new_standard(rate_limiter: Arc<OriginRateLimiter>) -> Self {
         Self::new(rate_limiter)
     }
 }
 
-impl RateLimitTelemetry<crate::tracing::DetailedSpanBackend> {
+impl RateLimitTelemetry<crate::tracing::legacy::DetailedSpanBackend> {
     pub fn new_detailed(rate_limiter: Arc<OriginRateLimiter>) -> Self {
         Self::new(rate_limiter)
     }
@@ -158,7 +158,7 @@ impl<S: RateLimitSpanBackend + Send + Sync + 'static> Middleware for RateLimitTe
         let result = next.run(req, extensions).await;
         
         // Enrich the span created by reqwest-tracing with rate limit state
-        if let Some(state) = extensions.get::<crate::tracing::RateLimitState>() {
+        if let Some(state) = extensions.get::<crate::tracing::legacy::RateLimitState>() {
             self.span_backend.enrich_span(state);
         }
         

@@ -1,5 +1,5 @@
-use crate::origin_registry::OriginRegistry;
-use crate::smoother::SmootherConfig;
+use crate::registry::origin::OriginRegistry;
+use crate::smoothing::smoother::SmootherConfig;
 use std::sync::Arc;
 
 pub struct HttpApiRateLimiter {
