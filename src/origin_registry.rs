@@ -42,7 +42,7 @@ impl OriginRegistry {
         limiters
             .entry(key)
             .or_insert_with(|| {
-                Arc::new(RwLock::new(OriginRateLimiter::new(self.smoother_config.clone())))
+                Arc::new(RwLock::new(OriginRateLimiter::with_smoother(self.smoother_config.clone())))
             })
             .clone()
     }

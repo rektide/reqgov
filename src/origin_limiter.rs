@@ -195,27 +195,47 @@ impl OriginRateLimiterState {
 
 pub struct OriginRateLimiter {
     slots: HashMap<String, PolicySlot>,
-    smoother: Smoother,
+    smoother: Option<Smoother>,
     fastest_policy: Option<String>,
     span_context: Arc<RwLock<Option<SpanContext>>>,
     span_enricher: Arc<dyn SpanEnricher + Send + Sync>,
 }
 
 impl OriginRateLimiter {
-    pub fn new(smoother_config: SmootherConfig) -> Self {
+    pub fn new() -> Self {
         Self {
             slots: HashMap::new(),
-            smoother: Smoother::new(smoother_config),
+            smoother: None,
             fastest_policy: None,
             span_context: Arc::new(RwLock::new(None)),
             span_enricher: Arc::new(StandardSpanEnricher),
         }
     }
 
-    pub fn with_span_enricher(smoother_config: SmootherConfig, enricher: Arc<dyn SpanEnricher + Send + Sync>) -> Self {
+    pub fn with_smoother(smoother_config: SmootherConfig) -> Self {
         Self {
             slots: HashMap::new(),
-            smoother: Smoother::new(smoother_config),
+            smoother: Some(Smoother::new(smoother_config)),
+            fastest_policy: None,
+            span_context: Arc::new(RwLock::new(None)),
+            span_enricher: Arc::new(StandardSpanEnricher),
+        }
+    }
+
+    pub fn with_span_enricher(enricher: Arc<dyn SpanEnricher + Send + Sync>) -> Self {
+        Self {
+            slots: HashMap::new(),
+            smoother: None,
+            fastest_policy: None,
+            span_context: Arc::new(RwLock::new(None)),
+            span_enricher: enricher,
+        }
+    }
+
+    pub fn with_smoother_and_span_enricher(smoother_config: SmootherConfig, enricher: Arc<dyn SpanEnricher + Send + Sync>) -> Self {
+        Self {
+            slots: HashMap::new(),
+            smoother: Some(Smoother::new(smoother_config)),
             fastest_policy: None,
             span_context: Arc::new(RwLock::new(None)),
             span_enricher: enricher,
@@ -253,10 +273,12 @@ impl OriginRateLimiter {
     }
 
     fn reconfigure_smoother(&mut self) {
-        if let Some(ref name) = self.fastest_policy {
-            if let Some(slot) = self.slots.get(name) {
-                let window = slot.policy.window_secs.unwrap_or(60);
-                self.smoother.configure(slot.remaining, window);
+        if let Some(ref mut smoother) = self.smoother {
+            if let Some(ref name) = self.fastest_policy {
+                if let Some(slot) = self.slots.get(name) {
+                    let window = slot.policy.window_secs.unwrap_or(60);
+                    smoother.configure(slot.remaining, window);
+                }
             }
         }
     }
@@ -264,16 +286,21 @@ impl OriginRateLimiter {
     pub fn check(&self) -> Result<(), RateLimitViolation> {
         let start = Instant::now();
 
-        let smoother_start = Instant::now();
-        let smoother_result = self.smoother.check();
-        let smoother_duration = smoother_start.elapsed();
-        let smoother_state = self.smoother.state();
-        let smoother_metrics = CheckMetrics {
-            duration: smoother_duration,
-            passed: smoother_result.is_ok(),
-            wait_duration: smoother_result.as_ref().err().map(|not_until| {
-                not_until.wait_time_from(self.smoother.clock().now())
-            }),
+        let (smoother_result, smoother_state, smoother_metrics) = if let Some(ref smoother) = self.smoother {
+            let smoother_start = Instant::now();
+            let result = smoother.check();
+            let state = smoother.state();
+            let duration = smoother_start.elapsed();
+            let metrics = CheckMetrics {
+                duration,
+                passed: result.is_ok(),
+                wait_duration: result.as_ref().err().map(|not_until| {
+                    not_until.wait_time_from(smoother.clock().now())
+                }),
+            };
+            (Some(result), Some(state), Some(metrics))
+        } else {
+            (None, None, None)
         };
 
         let mut policy_results = Vec::new();
@@ -298,9 +325,10 @@ impl OriginRateLimiter {
         }
 
         let total_duration = start.elapsed();
-        let all_passed = smoother_result.is_ok() && policy_results.iter().all(|(_, r)| r.passed);
+        let smoother_passed = smoother_result.as_ref().map(|r| r.is_ok()).unwrap_or(true);
+        let all_passed = smoother_passed && policy_results.iter().all(|(_, r)| r.passed);
         let limiting_policy = if !all_passed {
-            if smoother_result.is_err() {
+            if !smoother_passed {
                 None
             } else {
                 policy_results.iter().find(|(_, r)| !r.passed).map(|(name, _)| name.clone())
@@ -309,7 +337,7 @@ impl OriginRateLimiter {
             None
         };
 
-        let failed_policy = if all_passed || smoother_result.is_err() {
+        let failed_policy = if all_passed || !smoother_passed {
             None
         } else {
             policy_results.iter().find(|(_, r)| !r.passed).map(|(name, result)| {
@@ -318,7 +346,7 @@ impl OriginRateLimiter {
         };
 
         let extensions = SpanExtensions {
-            smoother_state: Some(smoother_state),
+            smoother_state,
             policy_states,
             attributes: HashMap::new(),
         };
@@ -327,7 +355,7 @@ impl OriginRateLimiter {
             all_passed,
             limiting_policy,
             total_duration,
-            smoother_metrics: Some(smoother_metrics),
+            smoother_metrics,
             policy_metrics: policy_results,
             extensions,
             metadata: SpanMetadata {
@@ -339,9 +367,9 @@ impl OriginRateLimiter {
 
         *self.span_context.write().unwrap() = Some(span_context);
 
-        if let Err(not_until) = smoother_result {
+        if let Some(Err(not_until)) = smoother_result {
             return Err(RateLimitViolation::Smoothed {
-                wait_duration: not_until.wait_time_from(self.smoother.clock().now()),
+                wait_duration: not_until.wait_time_from(self.smoother.as_ref().unwrap().clock().now()),
             });
         }
 
@@ -356,7 +384,9 @@ impl OriginRateLimiter {
     }
 
     pub async fn wait(&self) {
-        self.smoother.wait().await;
+        if let Some(ref smoother) = self.smoother {
+            smoother.wait().await;
+        }
 
         for slot in self.slots.values() {
             slot.wait().await;
@@ -405,15 +435,13 @@ mod tests {
 
     #[test]
     fn test_origin_rate_limiter_creation() {
-        let config = SmootherConfig::default();
-        let limiter = OriginRateLimiter::new(config);
+        let limiter = OriginRateLimiter::new();
         assert_eq!(limiter.slots.len(), 0);
     }
 
     #[test]
     fn test_update_policies() {
-        let config = SmootherConfig::default();
-        let mut limiter = OriginRateLimiter::new(config);
+        let mut limiter = OriginRateLimiter::new();
 
         let policies = vec![Policy {
             name: "burst".to_string(),
@@ -429,8 +457,7 @@ mod tests {
 
     #[test]
     fn test_update_multiple_policies() {
-        let config = SmootherConfig::default();
-        let mut limiter = OriginRateLimiter::new(config);
+        let mut limiter = OriginRateLimiter::new();
 
         let policies = vec![
             Policy {
@@ -455,8 +482,7 @@ mod tests {
 
     #[test]
     fn test_update_existing_policy() {
-        let config = SmootherConfig::default();
-        let mut limiter = OriginRateLimiter::new(config);
+        let mut limiter = OriginRateLimiter::new();
 
         let policies1 = vec![Policy {
             name: "burst".to_string(),
@@ -484,8 +510,7 @@ mod tests {
 
     #[test]
     fn test_fastest_policy_detection() {
-        let config = SmootherConfig::default();
-        let mut limiter = OriginRateLimiter::new(config);
+        let mut limiter = OriginRateLimiter::new();
 
         let policies = vec![
             Policy {
@@ -517,8 +542,7 @@ mod tests {
 
     #[test]
     fn test_check_allows_when_quotas_available() {
-        let config = SmootherConfig::default();
-        let mut limiter = OriginRateLimiter::new(config);
+        let mut limiter = OriginRateLimiter::new();
 
         let policies = vec![Policy {
             name: "burst".to_string(),
@@ -534,8 +558,7 @@ mod tests {
 
     #[test]
     fn test_update_limits() {
-        let config = SmootherConfig::default();
-        let mut limiter = OriginRateLimiter::new(config);
+        let mut limiter = OriginRateLimiter::new();
 
         let policies = vec![Policy {
             name: "burst".to_string(),
@@ -560,8 +583,7 @@ mod tests {
 
     #[test]
     fn test_check_allows_immediately_when_quotas_available() {
-        let config = SmootherConfig::default();
-        let mut limiter = OriginRateLimiter::new(config);
+        let mut limiter = OriginRateLimiter::new();
 
         let policies = vec![Policy {
             name: "burst".to_string(),
@@ -577,7 +599,7 @@ mod tests {
 
     #[test]
     fn test_state_capture_during_check() {
-        let mut limiter = OriginRateLimiter::new(SmootherConfig::default());
+        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
         limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
@@ -598,7 +620,7 @@ mod tests {
 
     #[test]
     fn test_fresh_state_fetches_current() {
-        let mut limiter = OriginRateLimiter::new(SmootherConfig::default());
+        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
         limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
@@ -620,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_state_uses_historical_by_default() {
-        let mut limiter = OriginRateLimiter::new(SmootherConfig::default());
+        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
         limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
@@ -638,7 +660,7 @@ mod tests {
 
     #[test]
     fn test_check_captures_metrics_with_timing() {
-        let mut limiter = OriginRateLimiter::new(SmootherConfig::default());
+        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
         limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
@@ -657,7 +679,7 @@ mod tests {
 
     #[test]
     fn test_span_enricher_standard() {
-        let mut limiter = OriginRateLimiter::new(SmootherConfig::default());
+        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
         limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
@@ -680,5 +702,152 @@ mod tests {
         extensions.set("custom.region", "us-east-1".into());
 
         assert_eq!(extensions.attributes.len(), 2);
+    }
+
+    #[test]
+    fn test_optional_smoother_new_constructor() {
+        let limiter = OriginRateLimiter::new();
+        assert_eq!(limiter.slots.len(), 0);
+        assert!(limiter.smoother.is_none());
+    }
+
+    #[test]
+    fn test_optional_smoother_with_smoother_constructor() {
+        let limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
+        assert_eq!(limiter.slots.len(), 0);
+        assert!(limiter.smoother.is_some());
+    }
+
+    #[test]
+    fn test_check_without_smoother() {
+        let mut limiter = OriginRateLimiter::new();
+
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        assert!(limiter.check().is_ok());
+    }
+
+    #[test]
+    fn test_state_without_smoother() {
+        let mut limiter = OriginRateLimiter::new();
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        limiter.check();
+        let state = limiter.historical_state().unwrap();
+
+        assert!(state.smoother.is_none());
+        assert_eq!(state.policies.len(), 1);
+        assert_eq!(state.mode, StateMode::Historical);
+        assert!(state.span_context.is_some());
+        assert_eq!(state.span_context.as_ref().unwrap().all_passed, true);
+        assert!(state.span_context.as_ref().unwrap().smoother_metrics.is_none());
+    }
+
+    #[test]
+    fn test_span_context_without_smoother() {
+        let mut limiter = OriginRateLimiter::new();
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        limiter.check();
+        let span_context = limiter.span_context().unwrap();
+
+        assert!(span_context.smoother_metrics.is_none());
+        assert_eq!(span_context.policy_metrics.len(), 1);
+        assert!(span_context.total_duration.as_nanos() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_wait_without_smoother() {
+        let mut limiter = OriginRateLimiter::new();
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        limiter.check();
+        limiter.wait().await;
+    }
+
+    #[test]
+    fn test_reconfigure_smoother_without_smoother() {
+        let mut limiter = OriginRateLimiter::new();
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        let limits = vec![ServiceLimit {
+            name: "burst".to_string(),
+            remaining: 75,
+            reset_secs: Some(30),
+            partition_key: None,
+        }];
+
+        limiter.update_limits(limits);
+        assert_eq!(limiter.slots["burst"].remaining, 75);
+    }
+
+    #[test]
+    fn test_with_span_enricher_constructor() {
+        let limiter = OriginRateLimiter::with_span_enricher(Arc::new(MinimalSpanEnricher));
+        assert_eq!(limiter.slots.len(), 0);
+        assert!(limiter.smoother.is_none());
+    }
+
+    #[test]
+    fn test_with_smoother_and_span_enricher_constructor() {
+        let limiter = OriginRateLimiter::with_smoother_and_span_enricher(
+            SmootherConfig::default(),
+            Arc::new(DetailedSpanEnricher)
+        );
+        assert_eq!(limiter.slots.len(), 0);
+        assert!(limiter.smoother.is_some());
+    }
+
+    #[test]
+    fn test_limiting_policy_without_smoother() {
+        let mut limiter = OriginRateLimiter::new();
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 1,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        limiter.check();
+        let result = limiter.check();
+
+        assert!(result.is_err());
+        match result {
+            Err(RateLimitViolation::PolicyExceeded { policy_name, .. }) => {
+                assert_eq!(policy_name, "burst");
+            }
+            _ => panic!("Expected PolicyExceeded error"),
+        }
     }
 }
