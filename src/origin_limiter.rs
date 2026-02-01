@@ -5,6 +5,7 @@ use governor::clock::Clock;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use tracing::Span;
 
 #[derive(Debug, Clone)]
 pub struct CheckMetrics {
@@ -20,15 +21,153 @@ pub enum StateMode {
 }
 
 #[derive(Debug, Clone)]
-pub struct LastCheckResult {
+pub struct SpanMetadata {
     pub timestamp: Instant,
+    pub duration: Duration,
+    pub mode: StateMode,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpanExtensions {
     pub smoother_state: Option<SmootherState>,
     pub policy_states: Vec<(String, PolicySlotState)>,
-    pub smoother_metrics: Option<CheckMetrics>,
-    pub policy_metrics: Vec<(String, CheckMetrics)>,
-    pub total_duration: Duration,
+    pub attributes: HashMap<&'static str, AttributeValue>,
+}
+
+impl SpanExtensions {
+    pub fn new() -> Self {
+        Self {
+            smoother_state: None,
+            policy_states: Vec::new(),
+            attributes: HashMap::new(),
+        }
+    }
+
+    pub fn set(&mut self, key: &'static str, value: AttributeValue) {
+        self.attributes.insert(key, value);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum AttributeValue {
+    Bool(bool),
+    U64(u64),
+    I64(i64),
+    Str(String),
+    Float(f64),
+    Duration(Duration),
+}
+
+impl From<bool> for AttributeValue {
+    fn from(value: bool) -> Self {
+        AttributeValue::Bool(value)
+    }
+}
+
+impl From<u64> for AttributeValue {
+    fn from(value: u64) -> Self {
+        AttributeValue::U64(value)
+    }
+}
+
+impl From<i64> for AttributeValue {
+    fn from(value: i64) -> Self {
+        AttributeValue::I64(value)
+    }
+}
+
+impl From<String> for AttributeValue {
+    fn from(value: String) -> Self {
+        AttributeValue::Str(value)
+    }
+}
+
+impl From<&str> for AttributeValue {
+    fn from(value: &str) -> Self {
+        AttributeValue::Str(value.to_string())
+    }
+}
+
+impl From<f64> for AttributeValue {
+    fn from(value: f64) -> Self {
+        AttributeValue::Float(value)
+    }
+}
+
+impl From<Duration> for AttributeValue {
+    fn from(value: Duration) -> Self {
+        AttributeValue::Duration(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SpanContext {
     pub all_passed: bool,
     pub limiting_policy: Option<String>,
+    pub total_duration: Duration,
+    pub smoother_metrics: Option<CheckMetrics>,
+    pub policy_metrics: Vec<(String, CheckMetrics)>,
+    pub extensions: SpanExtensions,
+    pub metadata: SpanMetadata,
+}
+
+pub trait SpanEnricher: Send + Sync {
+    fn enrich(&self, span: &Span, context: &SpanContext);
+    fn is_enabled(&self) -> bool {
+        true
+    }
+}
+
+pub struct MinimalSpanEnricher;
+
+impl SpanEnricher for MinimalSpanEnricher {
+    fn enrich(&self, span: &Span, context: &SpanContext) {
+        if context.all_passed {
+            span.record("rate_limit", "allowed");
+        } else {
+            span.record("rate_limit", "blocked");
+        }
+    }
+}
+
+pub struct StandardSpanEnricher;
+
+impl SpanEnricher for StandardSpanEnricher {
+    fn enrich(&self, span: &Span, context: &SpanContext) {
+        span.record("rate_limit.allowed", context.all_passed);
+        span.record("rate_limit.duration_ms", context.total_duration.as_millis());
+        
+        if let Some(ref policy) = context.limiting_policy {
+            span.record("rate_limit.limiting_policy", policy);
+        }
+    }
+}
+
+pub struct DetailedSpanEnricher;
+
+impl SpanEnricher for DetailedSpanEnricher {
+    fn enrich(&self, span: &Span, context: &SpanContext) {
+        let mode_str = format!("{:?}", context.metadata.mode);
+        span.record("rate_limit.mode", mode_str);
+        span.record("rate_limit.all_passed", context.all_passed);
+        span.record("rate_limit.duration_ms", context.total_duration.as_millis());
+        span.record("rate_limit.timestamp_ms", context.metadata.timestamp.elapsed().as_millis());
+        
+        if let Some(ref policy) = context.limiting_policy {
+            span.record("rate_limit.limiting_policy", policy.as_str());
+        }
+        
+        if let Some(ref smoother_state) = context.extensions.smoother_state {
+            span.record("rate_limit.smoother.remaining_per_interval", smoother_state.remaining_per_interval);
+        }
+        
+        for (name, state) in &context.extensions.policy_states {
+            let remaining_key = format!("rate_limit.policy.{}.remaining", name);
+            span.record(remaining_key.as_str(), state.remaining);
+            let quota_key = format!("rate_limit.policy.{}.quota", name);
+            span.record(quota_key.as_str(), state.quota);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -44,13 +183,13 @@ pub struct OriginRateLimiterState {
     pub policies: Vec<PolicySlotState>,
     pub will_throttle: bool,
     pub throttle_wait_duration: Option<Duration>,
-    pub last_check: Option<LastCheckResult>,
+    pub span_context: Option<SpanContext>,
     pub mode: StateMode,
 }
 
 impl OriginRateLimiterState {
     pub fn limiting_policy(&self) -> Option<&str> {
-        self.last_check.as_ref().and_then(|r| r.limiting_policy.as_deref())
+        self.span_context.as_ref().and_then(|r| r.limiting_policy.as_deref())
     }
 }
 
@@ -58,7 +197,8 @@ pub struct OriginRateLimiter {
     slots: HashMap<String, PolicySlot>,
     smoother: Smoother,
     fastest_policy: Option<String>,
-    last_check_result: Arc<RwLock<Option<LastCheckResult>>>,
+    span_context: Arc<RwLock<Option<SpanContext>>>,
+    span_enricher: Arc<dyn SpanEnricher + Send + Sync>,
 }
 
 impl OriginRateLimiter {
@@ -67,7 +207,18 @@ impl OriginRateLimiter {
             slots: HashMap::new(),
             smoother: Smoother::new(smoother_config),
             fastest_policy: None,
-            last_check_result: Arc::new(RwLock::new(None)),
+            span_context: Arc::new(RwLock::new(None)),
+            span_enricher: Arc::new(StandardSpanEnricher),
+        }
+    }
+
+    pub fn with_span_enricher(smoother_config: SmootherConfig, enricher: Arc<dyn SpanEnricher + Send + Sync>) -> Self {
+        Self {
+            slots: HashMap::new(),
+            smoother: Smoother::new(smoother_config),
+            fastest_policy: None,
+            span_context: Arc::new(RwLock::new(None)),
+            span_enricher: enricher,
         }
     }
 
@@ -166,18 +317,27 @@ impl OriginRateLimiter {
             })
         };
 
-        let last_result = LastCheckResult {
-            timestamp: Instant::now(),
+        let extensions = SpanExtensions {
             smoother_state: Some(smoother_state),
             policy_states,
-            smoother_metrics: Some(smoother_metrics),
-            policy_metrics: policy_results,
-            total_duration,
-            all_passed,
-            limiting_policy,
+            attributes: HashMap::new(),
         };
 
-        *self.last_check_result.write().unwrap() = Some(last_result);
+        let span_context = SpanContext {
+            all_passed,
+            limiting_policy,
+            total_duration,
+            smoother_metrics: Some(smoother_metrics),
+            policy_metrics: policy_results,
+            extensions,
+            metadata: SpanMetadata {
+                timestamp: Instant::now(),
+                duration: total_duration,
+                mode: StateMode::Historical,
+            },
+        };
+
+        *self.span_context.write().unwrap() = Some(span_context);
 
         if let Err(not_until) = smoother_result {
             return Err(RateLimitViolation::Smoothed {
@@ -217,25 +377,25 @@ impl OriginRateLimiter {
 
     /// Get historical state from last check (no governor calls)
     pub fn historical_state(&self) -> Option<OriginRateLimiterState> {
-        let last_check = self.last_check_result.read().unwrap().clone()?;
+        let span_context = self.span_context.read().unwrap().clone()?;
 
         Some(OriginRateLimiterState {
-            smoother: last_check.smoother_state.clone(),
-            policies: last_check.policy_states.iter().map(|(_, s)| s.clone()).collect(),
-            will_throttle: !last_check.all_passed,
-            throttle_wait_duration: if !last_check.all_passed {
-                last_check.smoother_metrics.as_ref().and_then(|s| s.wait_duration)
-                    .or_else(|| last_check.policy_metrics.iter().find_map(|(_, p)| p.wait_duration))
+            smoother: span_context.extensions.smoother_state.clone(),
+            policies: span_context.extensions.policy_states.iter().map(|(_, s)| s.clone()).collect(),
+            will_throttle: !span_context.all_passed,
+            throttle_wait_duration: if !span_context.all_passed {
+                span_context.smoother_metrics.as_ref().and_then(|s| s.wait_duration)
+                    .or_else(|| span_context.policy_metrics.iter().find_map(|(_, p)| p.wait_duration))
             } else {
                 None
             },
-            last_check: Some(last_check.clone()),
+            span_context: Some(span_context.clone()),
             mode: StateMode::Historical,
         })
     }
 
-    pub fn last_check_result(&self) -> Option<LastCheckResult> {
-        self.last_check_result.read().unwrap().clone()
+    pub fn span_context(&self) -> Option<SpanContext> {
+        self.span_context.read().unwrap().clone()
     }
 }
 
@@ -432,8 +592,8 @@ mod tests {
         assert!(state.smoother.is_some());
         assert_eq!(state.policies.len(), 1);
         assert_eq!(state.mode, StateMode::Historical);
-        assert!(state.last_check.is_some());
-        assert_eq!(state.last_check.as_ref().unwrap().all_passed, true);
+        assert!(state.span_context.is_some());
+        assert_eq!(state.span_context.as_ref().unwrap().all_passed, true);
     }
 
     #[test]
@@ -473,7 +633,7 @@ mod tests {
         let state = limiter.state();
 
         assert_eq!(state.mode, StateMode::Historical);
-        assert!(state.last_check.is_some());
+        assert!(state.span_context.is_some());
     }
 
     #[test]
@@ -488,10 +648,37 @@ mod tests {
         }]);
 
         limiter.check();
-        let last_check = limiter.last_check_result().unwrap();
+        let span_context = limiter.span_context().unwrap();
 
-        assert!(last_check.smoother_metrics.is_some());
-        assert_eq!(last_check.policy_metrics.len(), 1);
-        assert!(last_check.total_duration.as_nanos() > 0);
+        assert!(span_context.smoother_metrics.is_some());
+        assert_eq!(span_context.policy_metrics.len(), 1);
+        assert!(span_context.total_duration.as_nanos() > 0);
+    }
+
+    #[test]
+    fn test_span_enricher_standard() {
+        let mut limiter = OriginRateLimiter::new(SmootherConfig::default());
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        limiter.check();
+        let span_context = limiter.span_context().unwrap();
+        let enricher = StandardSpanEnricher;
+
+        assert!(enricher.is_enabled());
+    }
+
+    #[test]
+    fn test_span_extensions_custom_attributes() {
+        let mut extensions = SpanExtensions::new();
+        extensions.set("custom.org_id", "org-123".into());
+        extensions.set("custom.region", "us-east-1".into());
+
+        assert_eq!(extensions.attributes.len(), 2);
     }
 }
