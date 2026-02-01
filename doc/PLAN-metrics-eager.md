@@ -453,6 +453,164 @@ Default `state()` behavior preserved:
 - Fresh `state()`: Same as before (governor calls required)
 - **Net change:** Zero overhead in check(), reduced in historical state()
 
+## Future Enhancement: Conditional Metrics Capture
+
+### Current Issue
+
+**Always-on behavior:**
+- Every `check()` call captures full state snapshots and timing metrics
+- ~200 bytes per request stored in `LastCheckResult`
+- Cloning overhead even when user doesn't need detailed tracing
+
+**Impact:**
+- High-frequency rate limiting scenarios: 1000 RPS = 200KB/sec of state snapshots
+- Many users only need pass/fail, not detailed timing per limiter
+- Unnecessary memory allocation and GC pressure
+
+### Proposed Enhancement
+
+Add configuration flag to conditionally enable metrics capture:
+
+```rust
+pub struct SmootherConfig {
+    pub micro_interval_secs: u32,
+    pub velocity: f64,
+    pub capture_metrics: bool,  // NEW: Enable/disable state snapshots
+}
+
+#[derive(Debug, Clone)]
+pub struct OriginRateLimiter {
+    slots: HashMap<String, PolicySlot>,
+    smoother: Smoother,
+    fastest_policy: Option<String>,
+    last_check_result: Arc<RwLock<Option<LastCheckResult>>>,
+    capture_metrics: bool,  // NEW: Configuration flag
+}
+
+impl OriginRateLimiter {
+    pub fn new(smoother_config: SmootherConfig) -> Self {
+        Self {
+            slots: HashMap::new(),
+            smoother: Smoother::new(smoother_config),
+            fastest_policy: None,
+            last_check_result: Arc::new(RwLock::new(None)),
+            capture_metrics: smoother_config.capture_metrics,
+        }
+    }
+
+    pub fn check(&self) -> Result<(), RateLimitViolation> {
+        let start = Instant::now();
+
+        if self.capture_metrics {
+            // Capture full state + metrics (current implementation)
+            self.check_with_metrics_capture()
+        } else {
+            // Only check, don't capture state/metrics
+            self.check_without_metrics_capture()
+        }
+    }
+
+    fn check_with_metrics_capture(&self) -> Result<(), RateLimitViolation> {
+        // ... current implementation ...
+    }
+
+    fn check_without_metrics_capture(&self) -> Result<(), RateLimitViolation> {
+        // Simplified check without state snapshot
+        self.smoother.check().map_err(|not_until| RateLimitViolation::Smoothed {
+            wait_duration: not_until.wait_time_from(self.smoother.clock().now()),
+        })?;
+
+        for (name, slot) in &self.slots {
+            slot.check().map_err(|not_until| RateLimitViolation::PolicyExceeded {
+                policy_name: name.clone(),
+                wait_duration: not_until.wait_time_from(slot.clock().now()),
+            })?;
+        }
+
+        Ok(())
+    }
+}
+```
+
+### Tradeoffs
+
+| Mode | Benefits | Costs |
+|-------|-----------|--------|
+| **Always capture (current)** | - Always available for tracing<br>- No configuration needed<br>- Backward compatible | - ~200 bytes per request<br>- CPU overhead for cloning<br>- GC pressure |
+| **Conditional capture (proposed)** | - Zero overhead when disabled<br>- Performance-optimal for production<br>- Explicit control | - Must enable for tracing<br>- Config complexity<br>- Migration path needed |
+| **Hybrid (recommended)** | - Capture on rate limit only<br>- Best of both worlds<br>- Minimal overhead | - Slightly complex logic<br>- Missed metrics on passes<br>- Harder to explain |
+
+### Recommended Approach
+
+**Hybrid capture with tiered configuration:**
+
+```rust
+pub enum MetricsCaptureMode {
+    Disabled,          // Never capture (fastest)
+    OnFailure,         // Capture only on rate limit (default)
+    Always,            // Always capture (full tracing)
+}
+```
+
+**Benefits of hybrid:**
+- `Disabled`: Production with no tracing needed
+- `OnFailure` (default): Capture only when rate limit occurs (~1% of requests)
+- `Always`: Full tracing for debugging/development
+
+**Performance improvement:**
+- At 1000 RPS, 1% rate limit rate: 10 captures/sec instead of 1000
+- Memory reduction: 2KB/sec → 20KB/sec (100x improvement)
+- Still get full context when needed (rate limit debugging)
+
+### Implementation Plan
+
+1. Add `MetricsCaptureMode` enum with 3 variants
+2. Add `metrics_capture: MetricsCaptureMode` to `SmootherConfig`
+3. Store flag in `OriginRateLimiter`
+4. Modify `check()` to conditionally capture based on mode
+5. Add `check_simple()` path for Disabled mode
+6. Add deferred capture path for OnFailure mode
+7. Update documentation with configuration examples
+8. Add benchmarks for each mode
+9. Add tests for mode behavior
+
+### Configuration Examples
+
+```rust
+// Production: No tracing (fastest)
+let config = SmootherConfig {
+    micro_interval_secs: 1,
+    velocity: 1.5,
+    metrics_capture: MetricsCaptureMode::Disabled,
+};
+
+// Production: Trace failures (recommended default)
+let config = SmootherConfig {
+    micro_interval_secs: 1,
+    velocity: 1.5,
+    metrics_capture: MetricsCaptureMode::OnFailure,
+};
+
+// Development: Full tracing
+let config = SmootherConfig {
+    micro_interval_secs: 1,
+    velocity: 1.5,
+    metrics_capture: MetricsCaptureMode::Always,
+};
+```
+
+### Success Criteria for Enhancement
+
+- [ ] `MetricsCaptureMode` enum added
+- [ ] Configuration field added to `SmootherConfig`
+- [ ] `check()` conditionally captures based on mode
+- [ ] `Disabled` mode: No state/metrics captured
+- [ ] `OnFailure` mode: Captures only on rate limit
+- [ ] `Always` mode: Current behavior (backward compatible)
+- [ ] Benchmarks show performance improvement for Disabled/OnFailure
+- [ ] Documentation updated with configuration guidance
+- [ ] Migration guide provided for existing users
+
 ## Success Criteria
 
 - [ ] `LastCheckResult` includes full state snapshots (smoother + policies)
