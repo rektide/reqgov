@@ -33,7 +33,6 @@
 
 use crate::origin_limiter::OriginRateLimiter;
 use crate::tracing::{RateLimitSpanBackend, RateLimitState};
-use crate::SmootherConfig;
 use http::Extensions;
 use reqwest_middleware::{Middleware, Next, Result};
 use std::sync::Arc;

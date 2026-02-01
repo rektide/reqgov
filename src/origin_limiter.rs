@@ -3,7 +3,25 @@ use crate::policy_slot::{PolicySlot, PolicySlotState};
 use crate::smoother::{Smoother, SmootherConfig, SmootherState};
 use governor::clock::Clock;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone)]
+pub struct CheckMetrics {
+    pub duration: Duration,
+    pub passed: bool,
+    pub wait_duration: Option<Duration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LastCheckResult {
+    pub timestamp: Instant,
+    pub smoother: Option<CheckMetrics>,
+    pub policies: Vec<(String, CheckMetrics)>,
+    pub total_duration: Duration,
+    pub all_passed: bool,
+    pub limiting_policy: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub enum RateLimitViolation {
@@ -18,12 +36,20 @@ pub struct OriginRateLimiterState {
     pub policies: Vec<PolicySlotState>,
     pub will_throttle: bool,
     pub throttle_wait_duration: Option<Duration>,
+    pub last_check: Option<LastCheckResult>,
+}
+
+impl OriginRateLimiterState {
+    pub fn limiting_policy(&self) -> Option<&str> {
+        self.last_check.as_ref().and_then(|r| r.limiting_policy.as_deref())
+    }
 }
 
 pub struct OriginRateLimiter {
     slots: HashMap<String, PolicySlot>,
     smoother: Smoother,
     fastest_policy: Option<String>,
+    last_check_result: Arc<RwLock<Option<LastCheckResult>>>,
 }
 
 impl OriginRateLimiter {
@@ -32,6 +58,7 @@ impl OriginRateLimiter {
             slots: HashMap::new(),
             smoother: Smoother::new(smoother_config),
             fastest_policy: None,
+            last_check_result: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -75,17 +102,79 @@ impl OriginRateLimiter {
     }
 
     pub fn check(&self) -> Result<(), RateLimitViolation> {
-        self.smoother
-            .check()
-            .map_err(|not_until| RateLimitViolation::Smoothed {
-                wait_duration: not_until.wait_time_from(self.smoother.clock().now()),
-            })?;
+        let start = Instant::now();
 
+        let smoother_start = Instant::now();
+        let smoother_result = self.smoother.check();
+        let smoother_duration = smoother_start.elapsed();
+        let smoother_check = CheckMetrics {
+            duration: smoother_duration,
+            passed: smoother_result.is_ok(),
+            wait_duration: smoother_result.as_ref().err().map(|not_until| {
+                not_until.wait_time_from(self.smoother.clock().now())
+            }),
+        };
+
+        let mut policy_results = Vec::new();
         for (name, slot) in &self.slots {
-            slot.check().map_err(|not_until| RateLimitViolation::PolicyExceeded {
-                policy_name: name.clone(),
-                wait_duration: not_until.wait_time_from(slot.clock().now()),
-            })?;
+            let policy_start = Instant::now();
+            let policy_result = slot.check();
+            let policy_duration = policy_start.elapsed();
+
+            policy_results.push((
+                name.clone(),
+                CheckMetrics {
+                    duration: policy_duration,
+                    passed: policy_result.is_ok(),
+                    wait_duration: policy_result.as_ref().err().map(|not_until| {
+                        not_until.wait_time_from(slot.clock().now())
+                    }),
+                },
+            ));
+        }
+
+        let total_duration = start.elapsed();
+        let all_passed = smoother_result.is_ok() && policy_results.iter().all(|(_, r)| r.passed);
+        let limiting_policy = if !all_passed {
+            if smoother_result.is_err() {
+                None
+            } else {
+                policy_results.iter().find(|(_, r)| !r.passed).map(|(name, _)| name.clone())
+            }
+        } else {
+            None
+        };
+
+        let failed_policy = if all_passed || smoother_result.is_err() {
+            None
+        } else {
+            policy_results.iter().find(|(_, r)| !r.passed).map(|(name, result)| {
+                (name.clone(), result.wait_duration.unwrap())
+            })
+        };
+
+        let last_result = LastCheckResult {
+            timestamp: Instant::now(),
+            smoother: Some(smoother_check),
+            policies: policy_results,
+            total_duration,
+            all_passed,
+            limiting_policy,
+        };
+
+        *self.last_check_result.write().unwrap() = Some(last_result);
+
+        if let Err(not_until) = smoother_result {
+            return Err(RateLimitViolation::Smoothed {
+                wait_duration: not_until.wait_time_from(self.smoother.clock().now()),
+            });
+        }
+
+        if let Some((name, wait_duration)) = failed_policy {
+            return Err(RateLimitViolation::PolicyExceeded {
+                policy_name: name,
+                wait_duration,
+            });
         }
 
         Ok(())
@@ -108,20 +197,42 @@ impl OriginRateLimiter {
             .map(|slot| slot.state())
             .collect();
 
-        // Check if throttling will occur (note: this consumes a permit)
-        let check_result = self.check();
-        let will_throttle = check_result.is_err();
-        let throttle_wait_duration = check_result.err().map(|violation| match violation {
-            RateLimitViolation::Smoothed { wait_duration } => wait_duration,
-            RateLimitViolation::PolicyExceeded { wait_duration, .. } => wait_duration,
-        });
+        let last_check = self.last_check_result.read().unwrap().clone();
+        let (will_throttle, _limiting_policy) = match &last_check {
+            Some(result) => (
+                !result.all_passed,
+                result.limiting_policy.clone(),
+            ),
+            None => {
+                let check_result = self.check();
+                (
+                    check_result.is_err(),
+                    check_result.err().and_then(|violation| match violation {
+                        RateLimitViolation::Smoothed { .. } => None,
+                        RateLimitViolation::PolicyExceeded { policy_name, .. } => Some(policy_name),
+                    }),
+                )
+            }
+        };
 
         OriginRateLimiterState {
             smoother: Some(smoother_state),
             policies: policy_states,
             will_throttle,
-            throttle_wait_duration,
+            throttle_wait_duration: last_check.as_ref().and_then(|r| {
+                if !r.all_passed {
+                    r.smoother.as_ref().and_then(|s| s.wait_duration)
+                        .or_else(|| r.policies.iter().find_map(|(_, p)| p.wait_duration))
+                } else {
+                    None
+                }
+            }),
+            last_check,
         }
+    }
+
+    pub fn last_check_result(&self) -> Option<LastCheckResult> {
+        self.last_check_result.read().unwrap().clone()
     }
 }
 
