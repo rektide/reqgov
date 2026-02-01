@@ -4,12 +4,16 @@ use crate::smoother::SmootherConfig;
 use http::HeaderMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use url::Url;
 
 pub struct OriginRegistry {
     limiters: Arc<RwLock<HashMap<String, Arc<RwLock<OriginRateLimiter>>>>>,
     smoother_config: SmootherConfig,
+    global_semaphore: Arc<Semaphore>,
+    per_domain_semaphores: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>>,
+    max_concurrent_global: Option<usize>,
+    max_concurrent_per_domain: Option<usize>,
 }
 
 impl OriginRegistry {
@@ -17,6 +21,26 @@ impl OriginRegistry {
         Self {
             limiters: Arc::new(RwLock::new(HashMap::new())),
             smoother_config,
+            global_semaphore: Arc::new(Semaphore::new(usize::MAX)),
+            per_domain_semaphores: Arc::new(RwLock::new(HashMap::new())),
+            max_concurrent_global: None,
+            max_concurrent_per_domain: None,
+        }
+    }
+
+    pub fn with_concurrency_limits(
+        smoother_config: SmootherConfig,
+        max_concurrent_global: Option<usize>,
+        max_concurrent_per_domain: Option<usize>,
+    ) -> Self {
+        let global_permits = max_concurrent_global.unwrap_or(usize::MAX);
+        Self {
+            limiters: Arc::new(RwLock::new(HashMap::new())),
+            smoother_config,
+            global_semaphore: Arc::new(Semaphore::new(global_permits)),
+            per_domain_semaphores: Arc::new(RwLock::new(HashMap::new())),
+            max_concurrent_global,
+            max_concurrent_per_domain,
         }
     }
 
@@ -45,6 +69,36 @@ impl OriginRegistry {
                 Arc::new(RwLock::new(OriginRateLimiter::with_smoother(self.smoother_config.clone())))
             })
             .clone()
+    }
+
+    pub async fn get_global_semaphore(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.global_semaphore)
+    }
+
+    pub async fn get_domain_semaphore(&self, url: &Url) -> Arc<Semaphore> {
+        let key = Self::origin_key(url);
+
+        {
+            let semaphores = self.per_domain_semaphores.read().await;
+            if let Some(semaphore) = semaphores.get(&key) {
+                return Arc::clone(semaphore);
+            }
+        }
+
+        let mut semaphores = self.per_domain_semaphores.write().await;
+        let permits = self.max_concurrent_per_domain.unwrap_or(usize::MAX);
+        semaphores
+            .entry(key)
+            .or_insert_with(|| Arc::new(Semaphore::new(permits)))
+            .clone()
+    }
+
+    pub fn max_concurrent_global(&self) -> Option<usize> {
+        self.max_concurrent_global
+    }
+
+    pub fn max_concurrent_per_domain(&self) -> Option<usize> {
+        self.max_concurrent_per_domain
     }
 
     pub async fn update_from_response(&self, url: &Url, headers: &HeaderMap) {

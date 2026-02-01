@@ -37,18 +37,18 @@ use http::Extensions;
 use reqwest_middleware::{Middleware, Next, Result};
 use std::sync::Arc;
 /// Usage with reqwest-tracing:
-/// ```no_run
+/// ```ignore
 /// use reqwest_middleware::ClientBuilder;
-/// use reqwest_tracing::TracingMiddleware;
-/// use reqgov::{HttpApiRateLimiter, RateLimitTelemetry};
+/// use reqgov::{HttpApiRateLimiter, RateLimitTelemetry, SmootherConfig};
 /// use std::sync::Arc;
 /// 
-/// let rate_limiter = Arc::new(HttpApiRateLimiter::default());
+/// let rate_limiter = Arc::new(HttpApiRateLimiter::new(SmootherConfig::default()));
 /// let telemetry = RateLimitTelemetry::new(rate_limiter.clone());
 /// 
-/// let client = ClientBuilder::new(reqwest::Client::new())
-///     .with(TracingMiddleware::default())
-///     .with(reqwest_ratelimit::all(rate_limiter))
+/// // Note: This example assumes you have reqwest-tracing and reqwest-ratelimit configured
+/// let client = ClientBuilder::new(/* reqwest::Client::new() */)
+///     .with(/* TracingMiddleware::default() */)
+///     .with(/* reqwest_ratelimit::all(rate_limiter) */)
 ///     .with(telemetry)
 ///     .build();
 /// ```

@@ -27,11 +27,21 @@ pub struct SpanMetadata {
     pub mode: StateMode,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ConcurrencyMetrics {
+    pub global_active: Option<usize>,
+    pub global_max: Option<usize>,
+    pub domain_active: Option<usize>,
+    pub domain_max: Option<usize>,
+    pub wait_duration: Option<Duration>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SpanExtensions {
     pub smoother_state: Option<SmootherState>,
     pub policy_states: Vec<(String, PolicySlotState)>,
     pub attributes: HashMap<&'static str, AttributeValue>,
+    pub concurrency: ConcurrencyMetrics,
 }
 
 impl SpanExtensions {
@@ -40,6 +50,7 @@ impl SpanExtensions {
             smoother_state: None,
             policy_states: Vec::new(),
             attributes: HashMap::new(),
+            concurrency: ConcurrencyMetrics::default(),
         }
     }
 
@@ -188,11 +199,22 @@ impl ChainedEnricher {
         self
     }
 
-    pub fn with_enrichers<E>(mut self, enrichers: Vec<E>) -> Self {
+    pub fn with_enrichers<E: SpanEnricher + 'static>(mut self, enrichers: Vec<E>) -> Self {
         for enricher in enrichers {
             self.enrichers.push(Arc::new(enricher));
         }
         self
+    }
+
+    pub fn with_dyn_enrichers(mut self, enrichers: Vec<Arc<dyn SpanEnricher + Send + Sync>>) -> Self {
+        for enricher in enrichers {
+            self.enrichers.push(enricher);
+        }
+        self
+    }
+
+    pub fn build(self) -> Box<dyn SpanEnricher + Send + Sync> {
+        Box::new(self)
     }
 }
 
@@ -227,7 +249,7 @@ impl EnricherPresets {
 
     pub fn custom(enrichers: Vec<Arc<dyn SpanEnricher + Send + Sync>>) -> Box<dyn SpanEnricher + Send + Sync> {
         ChainedEnricher::new()
-            .with_enrichers(enrichers)
+            .with_dyn_enrichers(enrichers)
             .build()
     }
 }
@@ -250,6 +272,26 @@ impl SpanEnricher for DetailedSpanEnricher {
             span.record("rate_limit.smoother.remaining_per_interval", smoother_state.remaining_per_interval);
             span.record("rate_limit.smoother.micro_interval_secs", smoother_state.micro_interval_secs);
             span.record("rate_limit.smoother.velocity", smoother_state.velocity);
+        }
+    }
+}
+
+pub struct ConcurrencySpanEnricher;
+
+impl SpanEnricher for ConcurrencySpanEnricher {
+    fn enrich(&self, span: &Span, context: &SpanContext) {
+        let concurrency = &context.extensions.concurrency;
+
+        if let Some(global_max) = concurrency.global_max {
+            span.record("rate_limit.concurrent.global.max", global_max);
+        }
+
+        if let Some(domain_max) = concurrency.domain_max {
+            span.record("rate_limit.concurrent.domain.max", domain_max);
+        }
+
+        if let Some(wait_duration) = concurrency.wait_duration {
+            span.record("rate_limit.concurrent.wait_ms", wait_duration.as_millis());
         }
     }
 }
