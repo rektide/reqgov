@@ -558,11 +558,12 @@ let client = ClientBuilder::new(reqwest::Client::new())
 | Async Task Composition | Low | High | Medium | ❌ | Manual |
 | Async Iterator Chain | Very High | High | Slow | ❌ | Overkill |
 | Borrow Checker | High | Medium | Medium | ✅ | Complex |
-| **RAII + Async Then** | **Low** | **Medium** | **Fast** | **✅** | **Recommended** |
+| RAII + Async Then | Low | Medium | Fast | ✅ | Good |
+| **Unified Acquisition** | **Low** | **High** | **Fast** | **✅** | **Recommended** |
 
 ## Final Recommendation
 
-**Use Approach 5 (RAII + Async Task Composition)** for v0.2.0:
+**Use Approach 5 (RAII + Async Task Composition)** OR **Approach 6 (Unified Acquisition Pattern)** for v0.2.0:
 
 ```rust
 // Simple, safe, composable
@@ -579,6 +580,244 @@ async fn acquire_with_semaphore(
     let limiter = origin_limiter.get_or_create(origin);
     limiter.wait().await;
     Ok(())
+}
+```
+
+---
+
+## Approach 6: Unified Acquisition Pattern (NEW - Recommended)
+
+### Concept
+
+Instead of exposing separate semaphore and rate limiter, provide a single unified acquisition function that internally handles both. This is a facade pattern with a clean API.
+
+### Rationale
+
+- **Single call site**: Users call one `acquire()` method instead of remembering to call semaphore then limiter
+- **Implementation hiding**: Composition is internal, users just see "acquire permit"
+- **Easier to extend**: Adding more limiters (e.g., IP rate limiter) doesn't change user code
+- **Type safety**: Compiler ensures correct composition at creation time
+- **Zero overhead**: Compiler inlines the composition, no trait dispatch
+
+### Implementation
+
+```rust
+// Unified limiter that handles both semaphore and governor
+pub struct UnifiedRateLimiter {
+    semaphore: Option<Arc<Semaphore>>,
+    origin_limiter: Arc<OriginRateLimiter>,
+}
+
+impl UnifiedRateLimiter {
+    /// Create with both limiters
+    pub fn new(
+        semaphore: Option<usize>,
+        origin_limiter: Arc<OriginRateLimiter>,
+    ) -> Self {
+        let semaphore = semaphore.map(|max| Arc::new(Semaphore::new(max)));
+        Self {
+            semaphore,
+            origin_limiter,
+        }
+    }
+
+    /// Create without semaphore (backward compatible)
+    pub fn without_semaphore(origin_limiter: Arc<OriginRateLimiter>) -> Self {
+        Self {
+            semaphore: None,
+            origin_limiter,
+        }
+    }
+
+    /// Acquire permit from both limiters in one call
+    pub async fn acquire(&self, origin: &str) -> Result<UnifiedPermit> {
+        // Step 1: Acquire semaphore (if configured)
+        let sem_guard = match &self.semaphore {
+            Some(sem) => Some(sem.acquire().await),
+            None => None,
+        };
+
+        // Step 2: Acquire governor permit
+        let limiter = self.origin_limiter.get_or_create(origin);
+
+        // Check if rate limited
+        match limiter.check() {
+            Ok(_) => {
+                // Rate limit OK
+                Ok(UnifiedPermit {
+                    _marker: PhantomData,
+                    _sem_guard: sem_guard,
+                })
+            }
+            Err(violation) => {
+                // Rate limited - release semaphore and return wait duration
+                drop(sem_guard);
+                Err(violation.into())
+            }
+        }
+    }
+}
+
+// RAII guard that holds both permits
+pub struct UnifiedPermit<'a> {
+    _marker: PhantomData<&'a ()>,
+    _sem_guard: Option<SemaphorePermit<'a>>,
+}
+
+impl<'a> Drop for UnifiedPermit<'a> {
+    fn drop(&mut self) {
+        // Both semaphores released automatically on drop
+    }
+}
+```
+
+### Integration with reqwest_ratelimit
+
+```rust
+// New trait for unified limiter
+pub trait UnifiedRateLimiter: Send + Sync + 'static {
+    async fn acquire(&self, origin: &str) -> Result<UnifiedPermit>;
+}
+
+// Wrap origin limiter to implement unified trait
+pub struct OriginLimiterWrapper {
+    limiter: Arc<OriginRateLimiter>,
+}
+
+#[async_trait::async_trait]
+impl UnifiedRateLimiter for OriginLimiterWrapper {
+    async fn acquire(&self, origin: &str) -> Result<UnifiedPermit> {
+        let limiter = self.limiter.get_or_create(origin);
+        match limiter.check() {
+            Ok(_) => Ok(UnifiedPermit {
+                _marker: PhantomData,
+                _sem_guard: None, // No semaphore at this level
+            }),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+// Add semaphore in HttpApiRateLimiter
+pub struct HttpApiRateLimiter {
+    unified: UnifiedRateLimiter,  // NEW
+    registry: Arc<OriginRegistry>,
+}
+
+#[async_trait::async_trait]
+impl reqwest_ratelimit::RateLimiter for HttpApiRateLimiter {
+    async fn acquire_permit(&self, ctx: &Context<'_>) -> Result<reqwest_ratelimit::Permit> {
+        let origin = ctx.url().host_str().unwrap_or("default");
+        let permit = self.unified.acquire(origin).await?;
+
+        // Convert to reqwest_ratelimit::Permit
+        Ok(reqwest_ratelimit::Permit {
+            _marker: PhantomData,
+        })
+    }
+
+    pub fn with_semaphore(self, max_concurrent: usize) -> Self {
+        Self {
+            unified: UnifiedRateLimiterImpl::with_semaphore(&self.registry, max_concurrent),
+            registry: self.registry,
+        }
+    }
+}
+```
+
+### Usage Comparison
+
+```rust
+// Approach 5 (previous recommendation): User must remember to call both
+async fn make_request(limiter: &HttpApiRateLimiter) -> Result<Response> {
+    let origin = "api.example.com";
+
+    // User must remember: semaphore FIRST, then limiter
+    let _sem_guard = limiter.semaphore.acquire().await;
+    let _limiter_guard = limiter.origin_limiter.get_or_create(&origin).wait().await;
+
+    // Make request
+    // ...
+}
+
+// Approach 6 (new recommendation): Single call
+async fn make_request(limiter: &HttpApiRateLimiter) -> Result<Response> {
+    let origin = "api.example.com";
+
+    // Just one call!
+    let _permit = limiter.acquire(&origin).await?;
+
+    // Make request
+    // ...
+}
+```
+
+### Pros vs Approach 5
+
+| Aspect | Approach 5 | Approach 6 |
+|---------|--------------|-------------|
+| **User API** | 2 calls required | 1 call (cleaner) |
+| **Ordering** | User must remember | Guaranteed by implementation |
+| **Extensibility** | Manual composition | Extend unified trait |
+| **Performance** | Same (2 awaits) | Same (2 awaits) |
+| **Safety** | RAII on each | RAII on unified guard |
+| **Complexity** | Low | Low (more code) |
+| **Type safety** | Good | Excellent (compile-time) |
+
+### Adding More Limiters
+
+```rust
+// Easy to add third limiter (e.g., IP rate limiting)
+pub struct ExtendedUnifiedLimiter {
+    semaphore: Option<Arc<Semaphore>>,
+    origin_limiter: Arc<OriginRateLimiter>,
+    ip_limiter: Arc<IpRateLimiter>,  // NEW
+}
+
+pub async fn acquire(&self, origin: &str) -> Result<UnifiedPermit> {
+    let sem_guard = match &self.semaphore {
+        Some(sem) => Some(sem.acquire().await),
+        None => None,
+    };
+
+    // Now 3 limiters in sequence
+    let limiter = self.origin_limiter.get_or_create(origin);
+    match limiter.check() {
+        Ok(_) => {
+            match self.ip_limiter.check(origin) {
+                Ok(_) => Ok(UnifiedPermit { _marker: PhantomData, _sem_guard }),
+                Err(e) => {
+                    drop(sem_guard);
+                    Err(e.into())
+                }
+            }
+        }
+        Err(e) => {
+            drop(sem_guard);
+            Err(e.into())
+        }
+    }
+}
+```
+
+## Updated Final Recommendation
+
+**Use Approach 6 (Unified Acquisition Pattern)** for v0.2.0:
+
+```rust
+// Usage in reqwest_ratelimit implementation
+pub struct ComposedLimiter {
+    unified: UnifiedRateLimiter,
+}
+
+#[async_trait::async_trait]
+impl reqwest_ratelimit::RateLimiter for ComposedLimiter {
+    async fn acquire_permit(&self, ctx: &Context<'_>) -> Result<reqwest_ratelimit::Permit> {
+        let origin = ctx.url().host_str().unwrap_or("default");
+        let _permit = self.unified.acquire(origin).await?;
+
+        Ok(reqwest_ratelimit::Permit { _marker: PhantomData })
+    }
 }
 ```
 
