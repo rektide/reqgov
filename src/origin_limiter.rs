@@ -252,6 +252,10 @@ impl EnricherPresets {
             .with_dyn_enrichers(enrichers)
             .build()
     }
+
+    pub fn concurrency() -> Box<dyn SpanEnricher + Send + Sync> {
+        Box::new(ConcurrencySpanEnricher)
+    }
 }
 
 pub struct DetailedSpanEnricher;
@@ -976,5 +980,29 @@ mod tests {
             }
             _ => panic!("Expected PolicyExceeded error"),
         }
+    }
+
+    #[test]
+    fn test_concurrency_span_enricher() {
+        let mut limiter = OriginRateLimiter::with_smoother(SmootherConfig::default());
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: crate::policy::QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        limiter.check();
+        let span_context = limiter.span_context().unwrap();
+        let enricher = ConcurrencySpanEnricher;
+
+        assert!(enricher.is_enabled());
+    }
+
+    #[test]
+    fn test_enricher_presets_concurrency() {
+        let enricher = EnricherPresets::concurrency();
+        assert!(enricher.is_enabled());
     }
 }

@@ -24,7 +24,6 @@ mod integration_tests {
             }],
             will_throttle: true,
             throttle_wait_duration: Some(std::time::Duration::from_secs(2)),
-            concurrency: None,
         };
 
         MinimalSpanBackend.enrich_span(&state);
@@ -62,7 +61,6 @@ mod integration_tests {
             ],
             will_throttle: false,
             throttle_wait_duration: None,
-            concurrency: None,
         };
 
         StandardSpanBackend.enrich_span(&state);
@@ -90,7 +88,6 @@ mod integration_tests {
             }],
             will_throttle: true,
             throttle_wait_duration: Some(std::time::Duration::from_millis(1500)),
-            concurrency: None,
         };
 
         DetailedSpanBackend.enrich_span(&state);
@@ -105,7 +102,6 @@ mod integration_tests {
             policies: vec![],
             will_throttle: false,
             throttle_wait_duration: None,
-            concurrency: None,
         };
 
         NoOpSpanBackend.enrich_span(&state);

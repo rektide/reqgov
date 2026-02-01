@@ -30,28 +30,6 @@ pub struct RateLimitState {
     /// Overall whether rate limiting will cause a delay
     pub will_throttle: bool,
     pub throttle_wait_duration: Option<Duration>,
-
-    /// Concurrency limiting metrics
-    pub concurrency: Option<ConcurrencyState>,
-}
-
-/// Concurrency limiting state
-#[derive(Debug, Clone)]
-pub struct ConcurrencyState {
-    /// Active global concurrent requests
-    pub global_active: Option<usize>,
-
-    /// Maximum global concurrent requests
-    pub global_max: Option<usize>,
-
-    /// Active domain concurrent requests
-    pub domain_active: Option<usize>,
-
-    /// Maximum domain concurrent requests
-    pub domain_max: Option<usize>,
-
-    /// Time spent waiting for semaphore permit
-    pub wait_duration: Option<Duration>,
 }
 
 /// Minimal backend - only adds whether rate limiting occurred
@@ -95,19 +73,6 @@ impl RateLimitSpanBackend for StandardSpanBackend {
             let remaining_attr = format!("rate_limit.policy.{}.remaining", policy.name);
             span.record(quota_attr.as_str(), policy.quota);
             span.record(remaining_attr.as_str(), policy.remaining);
-        }
-
-        // Add concurrency info
-        if let Some(ref concurrency) = state.concurrency {
-            if let Some(global_max) = concurrency.global_max {
-                span.record("rate_limit.concurrent.global.max", global_max);
-            }
-            if let Some(domain_max) = concurrency.domain_max {
-                span.record("rate_limit.concurrent.domain.max", domain_max);
-            }
-            if let Some(wait_duration) = concurrency.wait_duration {
-                span.record("rate_limit.concurrent.wait_ms", wait_duration.as_millis());
-            }
         }
     }
 }

@@ -140,7 +140,7 @@ impl<S: RateLimitSpanBackend + Send + Sync + 'static> Middleware for RateLimitTe
     ) -> Result<reqwest_middleware::reqwest::Response> {
         // Get current limiter state before request
         let limiter_state = self.rate_limiter.state();
-        
+
         // Store URL for enrichment
         let url = req.url().as_str().to_string();
         let rate_limit_state = RateLimitState {
@@ -149,7 +149,6 @@ impl<S: RateLimitSpanBackend + Send + Sync + 'static> Middleware for RateLimitTe
             policies: limiter_state.policies,
             will_throttle: limiter_state.will_throttle,
             throttle_wait_duration: limiter_state.throttle_wait_duration,
-            concurrency: None,
         };
         
         // Store state in extensions for use after request
@@ -169,8 +168,8 @@ impl<S: RateLimitSpanBackend + Send + Sync + 'static> Middleware for RateLimitTe
 
 /// Telemetry middleware that includes concurrency limiting metrics
 ///
-/// This middleware works with `HttpApiRateLimiter` to capture both
-/// rate limiting and concurrency limiting telemetry.
+/// This middleware works with `HttpApiRateLimiter` to capture concurrency
+/// limiting telemetry (semaphore wait times) and enriches tracing spans.
 ///
 /// # Example
 ///
@@ -190,50 +189,30 @@ impl<S: RateLimitSpanBackend + Send + Sync + 'static> Middleware for RateLimitTe
 ///     .with(telemetry)
 ///     .build();
 /// ```
-pub struct ConcurrencyTelemetry<S: crate::tracing::RateLimitSpanBackend> {
+pub struct ConcurrencyTelemetry {
     rate_limiter: Arc<HttpApiRateLimiter>,
-    span_backend: S,
-    _phantom: std::marker::PhantomData<S>,
 }
 
-impl<S: crate::tracing::RateLimitSpanBackend + Default> ConcurrencyTelemetry<S> {
+impl ConcurrencyTelemetry {
     pub fn new(rate_limiter: Arc<HttpApiRateLimiter>) -> Self {
-        Self {
-            rate_limiter,
-            span_backend: S::default(),
-            _phantom: std::marker::PhantomData,
-        }
+        Self { rate_limiter }
     }
 }
 
-impl<S: crate::tracing::RateLimitSpanBackend> ConcurrencyTelemetry<S> {
-    pub fn with_backend(rate_limiter: Arc<HttpApiRateLimiter>, span_backend: S) -> Self {
-        Self {
-            rate_limiter,
-            span_backend,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<S: crate::tracing::RateLimitSpanBackend> Clone for ConcurrencyTelemetry<S> {
+impl Clone for ConcurrencyTelemetry {
     fn clone(&self) -> Self {
         Self {
             rate_limiter: Arc::clone(&self.rate_limiter),
-            span_backend: self.span_backend.clone(),
-            _phantom: std::marker::PhantomData,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl<S: crate::tracing::RateLimitSpanBackend + Send + Sync + 'static> Middleware
-    for ConcurrencyTelemetry<S>
-{
+impl Middleware for ConcurrencyTelemetry {
     async fn handle(
         &self,
         req: reqwest_middleware::reqwest::Request,
-        extensions: &mut Extensions,
+        _extensions: &mut Extensions,
         next: Next<'_>,
     ) -> Result<reqwest_middleware::reqwest::Response> {
         use std::time::Instant;
@@ -253,43 +232,22 @@ impl<S: crate::tracing::RateLimitSpanBackend + Send + Sync + 'static> Middleware
         let _domain_permit = domain_semaphore.acquire().await.unwrap();
         let domain_wait = domain_wait_start.elapsed();
 
-        // Get origin key for rate limiter lookup
-        let origin_key = format!("{}://{}", url.scheme(), url.host_str().unwrap_or("unknown"));
-
-        // Get rate limiter state
-        let limiter = registry.get_limiter(&url).await;
-        let limiter_state = limiter.read().await.state();
-
-        // Calculate active concurrent requests (approximate)
+        // Enrich span with concurrency telemetry
         let global_max = registry.max_concurrent_global();
         let domain_max = registry.max_concurrent_per_domain();
+        let total_wait = concurrency_wait + domain_wait;
 
-        let rate_limit_state = crate::tracing::RateLimitState {
-            origin: Some(origin_key),
-            smoother: limiter_state.smoother,
-            policies: limiter_state.policies,
-            will_throttle: limiter_state.will_throttle,
-            throttle_wait_duration: limiter_state.throttle_wait_duration,
-            concurrency: Some(crate::tracing::ConcurrencyState {
-                global_active: None, // Would need to track this separately
-                global_max,
-                domain_active: None, // Would need to track this separately
-                domain_max,
-                wait_duration: Some(concurrency_wait + domain_wait),
-            }),
-        };
-
-        // Store state in extensions
-        extensions.insert(rate_limit_state);
-
-        // Execute request
-        let result = next.run(req, extensions).await;
-
-        // Enrich span
-        if let Some(state) = extensions.get::<crate::tracing::RateLimitState>() {
-            self.span_backend.enrich_span(state);
+        if let Some(max) = global_max {
+            tracing::Span::current().record("rate_limit.concurrent.global.max", max);
+        }
+        if let Some(max) = domain_max {
+            tracing::Span::current().record("rate_limit.concurrent.domain.max", max);
+        }
+        if total_wait.as_millis() > 0 {
+            tracing::Span::current().record("rate_limit.concurrent.wait_ms", total_wait.as_millis());
         }
 
-        result
+        // Execute request
+        next.run(req, _extensions).await
     }
 }
