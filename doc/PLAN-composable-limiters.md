@@ -561,6 +561,14 @@ let client = ClientBuilder::new(reqwest::Client::new())
 | RAII + Async Then | Low | Medium | Fast | ✅ | Good |
 | **Unified Acquisition** | **Low** | **High** | **Fast** | **✅** | **Recommended** |
 
+### Benefits of Unified Acquisition Pattern
+
+- ✅ **Cleanest API**: One `acquire()` call per request
+- ✅ **Guaranteed ordering**: Implementation handles composition
+- ✅ **Easier to extend**: Add limiters by modifying unified trait
+- ✅ **Type safe**: Compiler ensures correct usage
+- ✅ **Zero runtime overhead**: No trait dispatch, inlined by compiler
+
 ## Final Recommendation
 
 **Use Approach 5 (RAII + Async Task Composition)** OR **Approach 6 (Unified Acquisition Pattern)** for v0.2.0:
