@@ -2,37 +2,42 @@
 
 ## Overview
 
-Design a builder pattern for composing multiple `SpanEnricher` implementations, allowing granular control over which enrichment is applied. Current implementation only supports a single enricher, but users need to combine multiple enrichers (e.g., `SmootherEnricher` + `StandardSpanEnricher`).
+Document simple composition of `SpanEnricher` implementations. We already have a clean, working design - no complex strategies or over-engineering needed.
 
-## Problem Statement
+## Current Design
 
-**Current limitation:**
+### We Already Have
+
+**Single trait for all enrichers:**
 ```rust
-pub struct OriginRateLimiter {
-    span_enricher: Arc<dyn SpanEnricher + Send + Sync>,  // SINGLE enricher only
+pub trait SpanEnricher: Send + Sync {
+    fn enrich(&self, span: &Span, context: &SpanContext);
+    fn is_enabled(&self) -> bool {
+        true
+    }
 }
 ```
 
-**User need:**
+**Single-purpose enrichers using the SAME trait:**
 ```rust
-// Want to combine enrichers
-let combined = SmootherEnricher
-    .and_then(StandardSpanEnricher)
-    .and_then(PolicyOnlyEnricher);
+pub struct MinimalSpanEnricher;
+impl SpanEnricher for MinimalSpanEnricher { /* ... */ }
 
-limiter.set_enricher(combined);
+pub struct StandardSpanEnricher;
+impl SpanEnricher for StandardSpanEnricher { /* ... */ }
+
+pub struct SmootherEnricher;
+impl SpanEnricher for SmootherEnricher { /* ... */ }
+
+pub struct DetailedSpanEnricher;
+impl SpanEnricher for DetailedSpanEnricher { /* ... */ }
 ```
 
-**Why composition is needed:**
-1. **Granular control**: Choose exactly which enrichers to apply
-2. **Mix & match**: Combine single-purpose enrichers
-3. **Flexible ordering**: Control enrichment sequence
-4. **Reusable patterns**: Common combinations as presets
-5. **Easy testing**: Compose and test enrichers independently
+**All implement the SAME trait - no separate traits needed!**
 
-## Proposed Architecture
+## Simple Composition
 
-### Option 1: Chained Enrichers (Recommended for simplicity)
+### ChainedEnricher (All we need)
 
 ```rust
 pub struct ChainedEnricher {
@@ -60,207 +65,55 @@ impl ChainedEnricher {
         self.enrichers.push(Arc::new(enricher));
         self
     }
-    
-    pub fn with_enrichers<E>(mut self, enrichers: Vec<E>) -> Self {
-        for enricher in enrichers {
-            self.enrichers.push(Arc::new(enricher));
-        }
-        self
-    }
 }
 ```
 
-**Usage:**
+**That's it! Simple, clean, works.**
+
+## Usage Examples
+
+### Example 1: Smoother Only
+
 ```rust
-let combined = ChainedEnricher::new()
+let enricher = ChainedEnricher::new()
+    .with_enricher(SmootherEnricher);
+```
+
+### Example 2: Smoother + Standard
+
+```rust
+let enricher = ChainedEnricher::new()
     .with_enricher(SmootherEnricher)
     .with_enricher(StandardSpanEnricher);
-
-let config = SmootherConfig {
-    span_enricher: Box::new(combined),
-};
 ```
 
-**Pros:**
-- Simple: Easy to understand and use
-- Fast: Linear iteration through enrichers
-- Flexible: Add/remove enrichers dynamically
-- No allocation: `Vec<Arc<>>` only allocated once
-
-**Cons:**
-- All enrichers always called (even if some disabled)
-- No short-circuit: Can't skip enrichers based on conditions
-- All-or-nothing: All enrichers or nothing
-
-**Recommendation:** Use this for production simplicity
-
-### Option 2: Conditional Chaining
+### Example 3: Smoother + Detailed
 
 ```rust
-pub struct ConditionalEnricher {
-    condition: Box<dyn Fn(&SpanContext) -> bool + Send + Sync>,
-    enricher: Arc<dyn SpanEnricher + Send + Sync>,
-}
-
-impl SpanEnricher for ConditionalEnricher {
-    fn enrich(&self, span: &Span, context: &SpanContext) {
-        if (self.condition)(context) {
-            self.enricher.enrich(span, context);
-        }
-    }
-}
-
-pub struct ConditionalEnricherBuilder {
-    condition: Option<Box<dyn Fn(&SpanContext) -> bool + Send + Sync>>,
-    enricher: Option<Arc<dyn SpanEnricher + Send + Sync>>,
-}
+let enricher = ChainedEnricher::new()
+    .with_enricher(SmootherEnricher)
+    .with_enricher(DetailedSpanEnricher);
 ```
 
-**Usage:**
-```rust
-let combined = ChainedEnricher::new()
-    .with_enricher(ConditionalEnricher::new(
-        |ctx| ctx.all_passed,
-        Box::new(SmootherEnricher)
-    ))
-    .with_enricher(ConditionalEnricher::new(
-        |ctx| ctx.limiting_policy.is_some(),
-        Box::new(StandardSpanEnricher)
-    ));
-```
-
-**Pros:**
-- Selective: Only enrich when conditions met
-- Efficient: Skip unnecessary enrichers
-- Flexible: Arbitrary conditions
-
-**Cons:**
-- Complex: Box<dyn Fn> overhead
-- Harder to test: Conditions in closure
-- Less predictable: Harder to visualize composition
-
-**Recommendation:** Use for conditional enrichment needs
-
-### Option 3: Enum-Based Composition (Type-safe)
+### Example 4: Standard Only (No Smoother)
 
 ```rust
-pub enum CompositeEnricher {
-    Single(Arc<dyn SpanEnricher + Send + Sync>),
-    Pair(Arc<dyn SpanEnricher + Send + Sync>, Arc<dyn SpanEnricher + Send + Sync>),
-    Triple(Arc<dyn SpanEnricher + Send + Sync>, Arc<dyn SpanEnricher + Send + Sync>, Arc<dyn SpanEnricher + Send + Sync>),
-    Chain(Arc<ChainedEnricher>),
-}
-
-impl SpanEnricher for CompositeEnricher {
-    fn enrich(&self, span: &Span, context: &SpanContext) {
-        match self {
-            CompositeEnricher::Single(e) => e.enrich(span, context),
-            CompositeEnricher::Pair(e1, e2) => {
-                e1.enrich(span, context);
-                e2.enrich(span, context);
-            }
-            CompositeEnricher::Triple(e1, e2, e3) => {
-                e1.enrich(span, context);
-                e2.enrich(span, context);
-                e3.enrich(span, context);
-            }
-            CompositeEnricher::Chain(e) => e.enrich(span, context),
-        }
-    }
-}
+let enricher = ChainedEnricher::new()
+    .with_enricher(StandardSpanEnricher);
 ```
 
-**Usage:**
-```rust
-let combined = CompositeEnricher::Pair(
-    Arc::new(SmootherEnricher),
-    Arc::new(StandardSpanEnricher),
-);
-```
-
-**Pros:**
-- Type-safe: Compile-time validation of arity
-- No allocation: Fixed-size variants
-- Clear: Easy to see composition structure
-- Fast: Direct pattern matching
-
-**Cons:**
-- Inflexible: Can't have 4+ enrichers at compile time
-- Boilerplate: Need new variant for each arity
-- Limited: Can't add/remove at runtime
-
-**Recommendation:** Use for fixed composition patterns
-
-### Option 4: Builder Pattern with Fluent API (Most Flexible)
+### Example 5: Minimal + Smoother + Standard
 
 ```rust
-pub struct SpanEnricherBuilder {
-    enrichers: Vec<Arc<dyn SpanEnricher + Send + Sync>>,
-}
-
-impl SpanEnricherBuilder {
-    pub fn new() -> Self {
-        Self {
-            enrichers: Vec::new(),
-        }
-    }
-    
-    pub fn with_enricher<E: SpanEnricher + 'static>(mut self, enricher: E) -> Self {
-        self.enrichers.push(Arc::new(enricher));
-        self
-    }
-    
-    pub fn with_smoother(mut self) -> Self {
-        self.with_enricher(SmootherEnricher)
-    }
-    
-    pub fn with_standard(mut self) -> Self {
-        self.with_enricher(StandardSpanEnricher)
-    }
-    
-    pub fn with_detailed(mut self) -> Self {
-        self.with_enricher(DetailedSpanEnricher)
-    }
-    
-    pub fn with_policies(mut self) -> Self {
-        self.with_enricher(PolicyOnlyEnricher)
-    }
-    
-    pub fn build(mut self) -> Box<dyn SpanEnricher + Send + Sync> {
-        Box::new(ChainedEnricher {
-            enrichers: std::mem::take(&mut self.enrichers),
-        })
-    }
-}
+let enricher = ChainedEnricher::new()
+    .with_enricher(MinimalSpanEnricher)
+    .with_enricher(SmootherEnricher)
+    .with_enricher(StandardSpanEnricher);
 ```
 
-**Usage:**
-```rust
-let combined = SpanEnricherBuilder::new()
-    .with_smoother()
-    .with_standard()
-    .build();
+## Presets (Convenience Functions)
 
-let config = SmootherConfig {
-    span_enricher: combined,
-};
-```
-
-**Pros:**
-- Fluent: Clean, readable API
-- Flexible: Add/remove enrichers at runtime
-- Type-safe: Compile-time methods for common enrichers
-- Extensible: Easy to add new builder methods
-- Testable: Build step creates final enricher
-
-**Cons:**
-- Complex: Builder pattern adds complexity
-- Overhead: Vec allocation, Box<dyn>
-- Learning curve: New pattern to learn
-
-**Recommendation:** Use this for maximum flexibility
-
-### Option 5: Preset-Based Composition (Best of Both Worlds)
+Just helper functions to create common combinations:
 
 ```rust
 pub struct EnricherPresets;
@@ -278,24 +131,10 @@ impl EnricherPresets {
         Box::new(DetailedSpanEnricher)
     }
     
-    pub fn production() -> Box<dyn SpanEnricher + Send + Sync> {
-        SpanEnricherBuilder::new()
-            .with_smoother()
-            .with_standard()
-            .build()
-    }
-    
-    pub fn debug() -> Box<dyn SpanEnricher + Send + Sync> {
-        SpanEnricherBuilder::new()
-            .with_smoother()
-            .with_detailed()
-            .with_standard()
-            .build()
-    }
-    
-    pub fn custom(enrichers: Vec<Arc<dyn SpanEnricher + Send + Sync>>) -> Box<dyn SpanEnricher + Send + Sync> {
-        SpanEnricherBuilder::new()
-            .with_enrichers(enrichers)
+    pub fn with_smoother(base: Box<dyn SpanEnricher + Send + Sync>) -> Box<dyn SpanEnricher + Send + Sync> {
+        ChainedEnricher::new()
+            .with_enricher(SmootherEnricher)
+            .with_enricher(base.into())
             .build()
     }
 }
@@ -303,276 +142,184 @@ impl EnricherPresets {
 
 **Usage:**
 ```rust
-// Presets for common use cases
+// Production: Smoother + Standard
 let config = SmootherConfig {
-    span_enricher: EnricherPresets::production(),
+    span_enricher: EnricherPresets::with_smoother(
+        Box::new(StandardSpanEnricher)
+    ),
 };
-
-// Custom composition
-let custom = EnricherPresets::custom(vec![
-    Arc::new(SmootherEnricher),
-    Arc::new(PolicyOnlyEnricher),
-]);
 ```
 
-**Pros:**
-- Simple: Choose preset for common needs
-- Flexible: Custom composition for complex needs
-- Discoverable: IDE completion shows available presets
-- Future-proof: Easy to add new presets
+## What We Don't Need
 
-**Cons:**
-- Limited: Presets may not match exact needs
-- Two APIs: Presets + custom (confusing)
+❌ **Separate traits** - We already have ONE `SpanEnricher` trait
+❌ **Complex strategies** - Enum-based, conditional, builder patterns all overkill
+❌ **Smoothing-specific trait** - `SmootherEnricher` implements `SpanEnricher` (same trait)
+❌ **Custom allocation patterns** - `Vec<Arc<>>` is sufficient
+❌ **Runtime configuration** - Just use builder methods
 
-**Recommendation:** Use for production presets + custom flexibility
+## Benefits
 
-## Comparison of Strategies
+### 1. Simple Design
 
-| Strategy | Flexibility | Performance | Complexity | Type Safety | Recommendation |
-|-----------|--------------|--------------|--------------|---------------|----------------|
-| Chained | Medium | High | Low | Low | Production simplicity |
-| Conditional | High | High (with skips) | Medium | Low | Conditional needs |
-| Enum-Based | Low (compile-time) | Very High | Medium | High | Fixed patterns |
-| Builder | Very High | Medium | High | Medium | Maximum flexibility |
-| Preset | Medium | Medium | Low | Medium | Common use cases |
+**One trait for everything:**
+```rust
+trait SpanEnricher {
+    fn enrich(&self, span: &Span, context: &SpanContext);
+    fn is_enabled(&self) -> bool { true }
+}
+```
+
+**All enrichers implement this trait:**
+- `MinimalSpanEnricher`
+- `StandardSpanEnricher`
+- `SmootherEnricher`
+- `DetailedSpanEnricher`
+- Any custom enricher user creates
+
+### 2. Easy Composition
+
+Just chain them together:
+```rust
+let enriched = ChainedEnricher::new()
+    .with_enricher(SmootherEnricher)
+    .with_enricher(StandardSpanEnricher);
+```
+
+### 3. Type Safety
+
+Compile-time validation:
+- All enrichers implement `SpanEnricher`
+- Can't accidentally use wrong trait
+- Method signatures guaranteed by trait
+
+### 4. Zero Learning Curve
+
+**For users:**
+1. Implement `SpanEnricher` trait
+2. Use `ChainedEnricher::new().with_enricher(YourEnricher)`
+3. Done!
+
+**No need to understand:**
+- Composition strategies
+- Builder patterns
+- Enum variants
+- Conditional logic
+
+### 5. Extensible
+
+**Add any enricher:**
+```rust
+pub struct CustomEnricher { /* ... */ }
+impl SpanEnricher for CustomEnricher { /* ... */ }
+
+let enriched = ChainedEnricher::new()
+    .with_enricher(CustomEnricher);
+```
+
+### 6. Testable
+
+Each enricher independently testable:
+```rust
+#[test]
+fn test_smoother_enricher() {
+    let enricher = SmootherEnricher;
+    // Test in isolation
+}
+```
 
 ## Implementation Steps
 
-### Phase 1: Create ChainedEnricher
+### Phase 1: Implement ChainedEnricher
 
-1. Define `ChainedEnricher` struct
-2. Implement `SpanEnricher` trait with iteration logic
-3. Add `new()`, `with_enricher()`, `with_enrichers()` methods
-4. Add tests for chaining behavior
-5. Add documentation with examples
+1. Add `ChainedEnricher` struct with `enrichers: Vec<Arc<dyn SpanEnricher>>`
+2. Implement `SpanEnricher` for `ChainedEnricher` (iterates and calls each)
+3. Implement `new()` constructor
+4. Implement `with_enricher()` method (push to Vec)
+5. Add tests for chaining 2+ enrichers
 
-### Phase 2: Create ConditionalEnricher
+### Phase 2: Create Presets
 
-1. Define `ConditionalEnricher` struct
-2. Implement `SpanEnricher` trait with condition check
-3. Add `new()` constructor with closure
-4. Add tests for conditional enrichment
-5. Add documentation with condition examples
-
-### Phase 3: Create Builder Pattern
-
-1. Define `SpanEnricherBuilder` struct
-2. Implement fluent API (`with_smoother()`, `with_standard()`, etc.)
-3. Implement `build()` method creating `ChainedEnricher`
-4. Add tests for builder composition
-5. Add documentation with builder examples
-
-### Phase 4: Create Presets
-
-1. Define `EnricherPresets` struct
-2. Implement preset methods (`minimal()`, `standard()`, etc.)
-3. Implement `custom()` for arbitrary composition
+1. Add `EnricherPresets` struct
+2. Implement helper functions: `minimal()`, `standard()`, `detailed()`
+3. Implement `with_smoother()` helper
 4. Add tests for preset correctness
-5. Add documentation with preset examples
 
-### Phase 5: Update Configuration
+### Phase 3: Update Configuration
 
-1. Update `SmootherConfig` to accept composed enrichers
-2. Add convenience constructors to `OriginRateLimiter`
-3. Update documentation with composition examples
-4. Add migration guide for single enricher users
+1. Update `OriginRateLimiter` to use `ChainedEnricher` if needed
+2. Or keep using single enrichers (current approach works fine)
+3. Update examples in documentation
+4. Add migration guide if changing from single to chained
 
-### Phase 6: Add Tests
+### Phase 4: Documentation
 
-1. Test chaining 2+ enrichers
-2. Test conditional enrichment
-3. Test builder with all fluent methods
-4. Test preset correctness
-5. Test custom composition
-6. Performance benchmarks for each strategy
+1. Update `PLAN-span-enrichment.md` to reflect simple design
+2. Document `ChainedEnricher` usage
+3. Document `EnricherPresets` convenience functions
+4. Remove obsolete sections about complex strategies
+5. Add simple composition examples
 
 ## Configuration Examples
 
-### Example 1: Minimal Enrichment
+### Example 1: Keep Current (Single Enricher)
 
 ```rust
-// Simplest: No detailed data
+// What we have now - works fine
 let config = SmootherConfig {
-    span_enricher: Box::new(MinimalSpanEnricher),
+    span_enricher: Box::new(StandardSpanEnricher),
 };
 ```
 
-### Example 2: Smoother + Standard (Production)
+### Example 2: Chain Smoother + Standard
 
 ```rust
-// Using ChainedEnricher
 let combined = ChainedEnricher::new()
     .with_enricher(SmootherEnricher)
-    .with_enricher(StandardSpanEnricher);
-
-// Or using presets
-let config = SmootherConfig {
-    span_enricher: EnricherPresets::production(),
-};
-```
-
-### Example 3: Smoother Only (Debugging)
-
-```rust
-// Just smoothing data
-let config = SmootherConfig {
-    span_enricher: Box::new(SmootherEnricher),
-};
-```
-
-### Example 4: Full Details (Development)
-
-```rust
-// Everything available
-let config = SmootherConfig {
-    span_enricher: Box::new(DetailedSpanEnricher),
-};
-```
-
-### Example 5: Custom Composition
-
-```rust
-// Using builder
-let custom = SpanEnricherBuilder::new()
-    .with_smoother()
-    .with_enricher(PolicyOnlyEnricher)
+    .with_enricher(StandardSpanEnricher)
     .build();
-
-// Using preset
-let custom = EnricherPresets::custom(vec![
-    Arc::new(SmootherEnricher),
-    Arc::new(MinimalSpanEnricher),
-]);
-```
-
-### Example 6: Conditional Enrichment
-
-```rust
-// Enrich smoother only when smoothing is active
-let combined = ChainedEnricher::new()
-    .with_enricher(ConditionalEnricher::new(
-        |ctx| ctx.extensions.smoother_state.is_some(),
-        Box::new(SmootherEnricher)
-    ))
-    .with_enricher(StandardSpanEnricher);
 
 let config = SmootherConfig {
     span_enricher: combined,
 };
 ```
 
-## Benefits
+### Example 3: Using Preset
 
-### 1. Granular Control
-
-Users can choose exactly which enrichment to apply:
-- Smoother only for debugging smoothing
-- Policies only for policy-focused analysis
-- Combined for production observability
-- Custom for organization-specific needs
-
-### 2. Mix & Match
-
-Combine any single-purpose enrichers:
-- `SmootherEnricher` + `StandardSpanEnricher`
-- `PolicyOnlyEnricher` + `MinimalSpanEnricher`
-- Any combination of built-in and custom enrichers
-
-### 3. Flexible Ordering
-
-Control sequence of enrichment:
-- Policies before smoothing (for correlation)
-- Smoothing before metadata (for context)
-- Custom order for specific needs
-
-### 4. Reusable Patterns
-
-Common combinations as presets:
-- `production()` = smoother + standard
-- `debug()` = smoother + detailed + standard
-- `minimal()` = just pass/fail
-
-### 5. Backward Compatible
-
-Existing single enricher still works:
 ```rust
-// Old code still works
 let config = SmootherConfig {
-    span_enricher: Box::new(StandardSpanEnricher),
+    span_enricher: EnricherPresets::with_smoother(
+        Box::new(StandardSpanEnricher)
+    ),
 };
 ```
 
-### 6. Testable Components
+### Example 4: Custom Enricher
 
-Each enricher independently testable:
-- Test `SmootherEnricher` in isolation
-- Test chaining behavior
-- Test builder composition
-- Test conditional logic
+```rust
+pub struct OrgEnricher { /* ... */ }
+impl SpanEnricher for OrgEnricher { /* ... */ }
 
-## Tradeoffs
-
-### ChainedEnricher
-
-**Pros:**
-- Simple and clear
-- Fast linear iteration
-- Flexible: Add/remove at runtime
-- No special cases
-
-**Cons:**
-- All enrichers called (no short-circuit)
-- Vec allocation on build
-- No conditional execution
-
-**Recommendation:** Use for production
-
-### Builder Pattern
-
-**Pros:**
-- Fluent, readable API
-- Maximum flexibility
-- Type-safe common methods
-- Easy to extend
-
-**Cons:**
-- Most complex approach
-- Box<dyn> allocation
-- Learning curve for users
-
-**Recommendation:** Use for complex needs
-
-### Preset-Based
-
-**Pros:**
-- Simple for common cases
-- Discoverable via IDE
-- Future-proof (add new presets)
-
-**Cons:**
-- Limited to defined presets
-- Two APIs (presets + custom)
-- May not match exact needs
-
-**Recommendation:** Use for production defaults
+let custom = ChainedEnricher::new()
+    .with_enricher(OrgEnricher)
+    .with_enricher(StandardSpanEnricher)
+    .build();
+```
 
 ## Success Criteria
 
 - [ ] `ChainedEnricher` struct defined and implemented
-- [ ] `SpanEnricher` trait works with chained enrichers
-- [ ] `SpanEnricherBuilder` with fluent API defined
-- [ ] Builder has methods: `with_smoother()`, `with_standard()`, `with_detailed()`, `with_policies()`, `build()`
-- [ ] `EnricherPresets` with preset methods defined
-- [ ] Configuration examples for all strategies
+- [ ] `SpanEnricher` trait works with chained composition
+- [ ] `ChainedEnricher::new()` constructor
+- [ ] `ChainedEnricher::with_enricher()` method
+- [ ] `EnricherPresets` with helper functions defined
 - [ ] Tests for chaining 2+ enrichers
-- [ ] Tests for builder composition
 - [ ] Tests for preset correctness
-- [ ] Tests for conditional enrichment
-- [ ] Performance benchmarks for each strategy
-- [ ] Documentation updated with composition examples
-- [ ] Migration guide provided
-- [ ] All existing tests pass with new composition
+- [ ] Documentation updated with simple design
+- [ ] Complex strategy sections removed from docs
+- [ ] Configuration examples for simple composition
+- [ ] All existing tests pass
+- [ ] Migration guide (if needed)
 
 ## Related Work
 
