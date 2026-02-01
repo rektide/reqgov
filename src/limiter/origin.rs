@@ -684,9 +684,9 @@ mod tests {
     }
 }
 
+
     #[test]
     fn test_enricher_presets_concurrency() {
         let enricher = crate::tracing::enricher::chain::EnricherPresets::concurrency();
         assert!(enricher.is_enabled());
-    }
 }
