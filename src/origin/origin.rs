@@ -1,9 +1,8 @@
 use crate::origin::state::RateLimitViolation;
-use crate::origin::policies::{Policy, QuotaUnit, ServiceLimit};
+use crate::origin::policies::{Policy, ServiceLimit};
 use crate::origin::slots::PolicySlot;
 use crate::origin::smoother::{Smoother, SmootherConfig};
 use governor::clock::Clock;
-use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::sync::Arc;
 
@@ -26,7 +25,6 @@ impl OriginRateLimiterBuilder {
         OriginRateLimiter {
             smoother: Arc::new(tokio::sync::RwLock::new(self.smoother_config.map(Smoother::new))),
             slots: Arc::new(DashMap::new()),
-            fastest_policy: ArcSwap::from_pointee(None),
         }
     }
 }
@@ -34,7 +32,6 @@ impl OriginRateLimiterBuilder {
 pub struct OriginRateLimiter {
     pub(crate) smoother: Arc<tokio::sync::RwLock<Option<Smoother>>>,
     pub(crate) slots: Arc<DashMap<String, PolicySlot>>,
-    fastest_policy: ArcSwap<Option<String>>,
 }
 
 impl Clone for OriginRateLimiter {
@@ -42,7 +39,6 @@ impl Clone for OriginRateLimiter {
         Self {
             smoother: Arc::clone(&self.smoother),
             slots: Arc::clone(&self.slots),
-            fastest_policy: ArcSwap::new(self.fastest_policy.load_full()),
         }
     }
 }
@@ -62,35 +58,12 @@ impl OriginRateLimiter {
                 .and_modify(|slot| slot.policy = policy.clone())
                 .or_insert_with(|| PolicySlot::new(policy));
         }
-        self.recalculate_fastest();
     }
 
     pub async fn update_limits(&self, limits: Vec<ServiceLimit>) {
         for limit in limits {
             if let Some(mut slot) = self.slots.get_mut(&limit.name) {
                 slot.update(&limit);
-            }
-        }
-        self.reconfigure_smoother().await;
-    }
-
-    fn recalculate_fastest(&self) {
-        let fastest = self.slots
-            .iter()
-            .filter_map(|s| s.value().policy.window_secs.map(|w| (s.key().clone(), w)))
-            .min_by_key(|(_, w)| *w)
-            .map(|(name, _)| name);
-        self.fastest_policy.store(Arc::new(fastest));
-    }
-
-    async fn reconfigure_smoother(&self) {
-        let fastest = self.fastest_policy.load();
-        if let Some(ref name) = **fastest {
-            if let Some(slot) = self.slots.get(name) {
-                let window = slot.policy.window_secs.unwrap_or(60);
-                if let Some(smoother) = self.smoother.write().await.as_mut() {
-                    smoother.configure(slot.remaining, window);
-                }
             }
         }
     }
@@ -135,6 +108,7 @@ impl OriginRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::origin::policies::QuotaUnit;
 
     #[tokio::test]
     async fn test_limiter_new() {
