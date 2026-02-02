@@ -1,4 +1,4 @@
-use reqgov::{ConcurrencyRegistry, ConcurrencyRateLimiter, OriginRateLimiter, OriginRegistry, SmootherConfig};
+use reqgov::{ConcurrencyRegistry, ConcurrencyRateLimiter, OriginLimiter, OriginRegistry, SmootherConfig};
 use reqwest_ratelimit::RateLimiter;
 use std::sync::Arc;
 
@@ -40,13 +40,13 @@ async fn test_registry_multiple_origins() {
     let url2 = url::Url::parse("https://api.gitlab.com/projects").unwrap();
     let url3 = url::Url::parse("https://api.custom.com/data").unwrap();
 
-    let limiter1 = registry.get_limiter(&url1).await;
-    let limiter2 = registry.get_limiter(&url2).await;
-    let limiter3 = registry.get_limiter(&url3).await;
+    let origin_limiter1 = registry.get_origin_limiter(&url1);
+    let origin_limiter2 = registry.get_origin_limiter(&url2);
+    let origin_limiter3 = registry.get_origin_limiter(&url3);
 
-    limiter1.wait().await;
-    limiter2.wait().await;
-    limiter3.wait().await;
+    origin_limiter1.wait().await;
+    origin_limiter2.wait().await;
+    origin_limiter3.wait().await;
 }
 
 #[tokio::test]
@@ -60,8 +60,8 @@ async fn test_registry_same_origin_same_limiter() {
     let url1 = url::Url::parse("https://api.example.com/endpoint1").unwrap();
     let url2 = url::Url::parse("https://api.example.com/endpoint2").unwrap();
 
-    let limiter1 = registry.get_limiter(&url1).await;
-    let limiter2 = registry.get_limiter(&url2).await;
+    let limiter1 = registry.get_origin_limiter(&url1);
+    let limiter2 = registry.get_origin_limiter(&url2);
 
     assert!(Arc::ptr_eq(&limiter1, &limiter2));
 }
@@ -92,8 +92,8 @@ async fn test_registry_update_from_response() {
 
     registry.update_from_response(&url, &headers).await;
 
-    let limiter = registry.get_limiter(&url).await;
-    limiter.check().await.unwrap();
+    let origin_limiter = registry.get_origin_limiter(&url);
+    origin_limiter.check().await.unwrap();
 }
 
 #[tokio::test]
@@ -111,8 +111,8 @@ async fn test_registry_concurrent_access() {
         let registry = Arc::clone(&registry);
         let url = url.clone();
         handles.push(tokio::spawn(async move {
-            let limiter = registry.get_limiter(&url).await;
-            limiter.wait().await;
+            let origin_limiter = registry.get_origin_limiter(&url);
+            origin_limiter.wait().await;
         }));
     }
 

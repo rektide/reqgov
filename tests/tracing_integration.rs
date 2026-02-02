@@ -1,12 +1,12 @@
 mod integration_tests {
     use reqgov::{
-        OriginRateLimiter, Policy, PolicyTracer, SmootherConfig, SmootherTracer, StatusTracer,
+        OriginLimiter, Policy, PolicyTracer, SmootherConfig, SmootherTracer, StatusTracer,
     };
     use std::sync::Arc;
 
     #[test]
     fn test_rate_limit_tracing_creation() {
-        let _limiter: Arc<OriginRateLimiter> = Arc::new(OriginRateLimiter::new());
+        let _limiter: Arc<OriginLimiter> = Arc::new(OriginLimiter::new());
     }
 
     #[test]
@@ -26,18 +26,14 @@ mod integration_tests {
 
     #[test]
     fn test_limiter_with_smoother_for_tracing() {
-        let limiter = Arc::new(
-            OriginRateLimiter::builder()
-                .smoother(SmootherConfig::default())
-                .build(),
-        );
+        let limiter = Arc::new(OriginLimiter::builder().build());
 
         let _limiter = limiter;
     }
 
     #[test]
     fn test_limiter_slots_accessible_for_tracing() {
-        let mut limiter = OriginRateLimiter::new();
+        let mut limiter = OriginLimiter::new();
         limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
@@ -51,12 +47,7 @@ mod integration_tests {
 
     #[test]
     fn test_smoother_fields_accessible_for_tracing() {
-        let limiter = OriginRateLimiter::builder()
-            .smoother(SmootherConfig {
-                micro_interval_secs: 5,
-                velocity: 2.0,
-            })
-            .build();
+        let limiter = OriginLimiter::builder().build();
 
         let _limiter = limiter;
     }

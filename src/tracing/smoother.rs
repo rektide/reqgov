@@ -1,4 +1,4 @@
-use crate::origin::origin::OriginRateLimiter;
+use crate::origin::smoother_limiter::SmootherLimiter;
 use http::Extensions;
 use reqwest_middleware::{Middleware, Next, Result};
 use std::sync::Arc;
@@ -13,7 +13,7 @@ impl Middleware for SmootherTracer {
         extensions: &mut Extensions,
         next: Next<'_>,
     ) -> Result<reqwest_middleware::reqwest::Response> {
-        if let Some(limiter) = extensions.get::<Arc<OriginRateLimiter>>() {
+        if let Some(limiter) = extensions.get::<Arc<SmootherLimiter>>() {
             let smoother_read = limiter.smoother.read().await;
             if let Some(ref smoother) = *smoother_read {
                 let span = tracing::Span::current();

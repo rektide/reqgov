@@ -1,4 +1,5 @@
-pub mod origin;
+pub mod origin_limiter;
+pub mod smoother_limiter;
 pub mod state;
 pub mod registry;
 pub mod policies;
@@ -6,7 +7,8 @@ pub mod slots;
 pub mod smoother;
 pub mod parsing;
 
-pub use origin::{OriginRateLimiter, OriginRateLimiterBuilder};
+pub use origin_limiter::{OriginLimiter, OriginLimiterBuilder};
+pub use smoother_limiter::SmootherLimiter;
 pub use registry::{OriginRegistry, OriginRegistryBuilder};
 pub use state::RateLimitViolation;
 pub use policies::{Policy, QuotaUnit, ServiceLimit};

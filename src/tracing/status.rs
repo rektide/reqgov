@@ -1,4 +1,4 @@
-use crate::origin::origin::OriginRateLimiter;
+use crate::origin::origin_limiter::OriginLimiter;
 use crate::origin::state::RateLimitViolation;
 use http::Extensions;
 use reqwest_middleware::{Middleware, Next, Result};
@@ -14,7 +14,7 @@ impl Middleware for StatusTracer {
         extensions: &mut Extensions,
         next: Next<'_>,
     ) -> Result<reqwest_middleware::reqwest::Response> {
-        if let Some(limiter) = extensions.get::<Arc<OriginRateLimiter>>() {
+        if let Some(limiter) = extensions.get::<Arc<OriginLimiter>>() {
             let span = tracing::Span::current();
             match limiter.check().await {
                 Ok(()) => {

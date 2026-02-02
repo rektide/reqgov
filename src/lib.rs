@@ -2,7 +2,7 @@ mod origin;
 mod concurrency;
 mod tracing;
 
-pub use origin::{OriginRateLimiter, OriginRateLimiterBuilder, OriginRegistry, OriginRegistryBuilder, RateLimitViolation};
+pub use origin::{OriginLimiter, OriginLimiterBuilder, SmootherLimiter, OriginRegistry, OriginRegistryBuilder, RateLimitViolation};
 pub use origin::{Policy, QuotaUnit, ServiceLimit, PolicySlot};
 pub use origin::{Smoother, SmootherConfig};
 pub use origin::{parse_limit_header, parse_policy_header};

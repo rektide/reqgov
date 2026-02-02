@@ -1,4 +1,4 @@
-use reqgov::{ConcurrencyRateLimiter, OriginRateLimiter, SmootherConfig};
+use reqgov::{ConcurrencyRateLimiter, OriginLimiter, SmootherConfig};
 
 #[test]
 fn test_concurrency_rate_limiter_basic() {
@@ -7,7 +7,5 @@ fn test_concurrency_rate_limiter_basic() {
 
 #[test]
 fn test_origin_rate_limiter_basic() {
-    let _limiter = OriginRateLimiter::builder()
-        .smoother(SmootherConfig::default())
-        .build();
+    let _limiter = OriginLimiter::builder().build();
 }
