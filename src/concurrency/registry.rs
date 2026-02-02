@@ -54,10 +54,14 @@ impl ConcurrencyRegistry {
 
     pub fn get_domain_semaphore(&self, url: &Url) -> Arc<Semaphore> {
         let key = origin_key(url);
+        self._get_domain_semaphore(&key)
+    }
+
+    fn _get_domain_semaphore(&self, key: &str) -> Arc<Semaphore> {
         let permits = self.max_concurrent_per_domain.unwrap_or(i32::MAX as usize);
 
         self.per_domain_semaphores
-            .entry(key)
+            .entry(key.to_string())
             .or_insert_with(|| Arc::new(Semaphore::new(permits)))
             .clone()
     }
