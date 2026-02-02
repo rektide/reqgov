@@ -14,7 +14,8 @@ impl Middleware for SmootherTracer {
         next: Next<'_>,
     ) -> Result<reqwest_middleware::reqwest::Response> {
         if let Some(limiter) = extensions.get::<Arc<OriginRateLimiter>>() {
-            if let Some(smoother) = limiter.smoother() {
+            let smoother_read = limiter.smoother.read().await;
+            if let Some(ref smoother) = *smoother_read {
                 let span = tracing::Span::current();
                 span.record("rate_limit.smoother.remaining", smoother.remaining());
                 span.record("rate_limit.smoother.velocity", smoother.velocity);

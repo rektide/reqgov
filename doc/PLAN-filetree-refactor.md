@@ -1,413 +1,348 @@
-# File Tree Refactoring Plan - Incremental Approach
+# File Tree Refactoring Plan - Final Structure
 
 ## Overview
 
-Refactor `src/` directory to address separation of concerns, focusing on breaking down the 1008-line `origin_limiter.rs` file that currently contains 42% of the codebase.
+Refactor `src/` directory for clear separation of concerns. The project now has two main limiting systems:
+- **origin/** - Per-domain rate limiting with policy slots and smoothing
+- **concurrency/** - Concurrent request limiting with semaphores
 
-## Current State Analysis
+## Current State
 
 ### Problem Areas
 
-**origin_limiter.rs (1008 lines) - Critical bottleneck**
-Contains mixed concerns:
-- 1 trait (`SpanEnricher`)
-- 5 enricher structs (Minimal, Standard, Smoother, Detailed, Concurrency)
-- `ChainedEnricher` + `EnricherPresets`
-- 8+ context/type structs (SpanContext, SpanMetadata, SpanExtensions, ConcurrencyMetrics, AttributeValue, CheckMetrics, StateMode)
-- `RateLimitViolation` enum
-- `OriginRateLimiterState` + `OriginRateLimiter` (core logic)
-
 **Scattered concerns:**
-- `tracing.rs` + `tracing_middleware.rs` - Old `RateLimitSpanBackend` system
-- `policy.rs` + `policy_slot.rs` - Related but separate
-- `parser.rs` - Header parsing only used by registry
-- `middleware.rs` - HTTP middleware wrapper
+- `parsing/` - Header parsing only used by origin
+- `policies/` - Policy types only used by origin
+- `smoothing/` - Smoother only used by origin
+- `registry/origin.rs` - Old registry, no longer used
+- `tracing/` - Tracer middleware for both systems
 
-### Current File Sizes
+### Current Architecture
 
-| File | Lines | % of Codebase |
-|-------|--------|----------------|
-| origin_limiter.rs | 1008 | 42% |
-| tracing_middleware.rs | 253 | 11% |
-| policy_slot.rs | 242 | 10% |
-| parser.rs | 206 | 9% |
-| smoother.rs | 198 | 8% |
-| origin_registry.rs | 173 | 7% |
-| tracing.rs | 145 | 6% |
-| middleware.rs | 101 | 4% |
-| policy.rs | 54 | 2% |
-| lib.rs | 27 | 1% |
-| **Total** | **2407** | **100%** |
+**Origin Rate Limiting:**
+- `OriginRegistry` - Manages domain→limiter mapping, implements Middleware
+- `OriginRateLimiter` - Single domain rate limiter
+  - `Option<Smoother>` - Per-domain smoothing
+  - `DashMap<policy_name, PolicySlot>` - Policy-based rate limiting
 
-## Proposed File Structure (Option 3)
+**Concurrency Rate Limiting:**
+- `ConcurrencyRegistry` - Manages semaphores
+- `ConcurrencyRateLimiter` - Implements Middleware
+
+## Proposed Final File Structure
 
 ```
 src/
 ├── lib.rs
-├── limiter/
+├── origin/
 │   ├── mod.rs
-│   ├── origin.rs         # OriginRateLimiter core logic (~300 lines)
-│   ├── state.rs         # OriginRateLimiterState, RateLimitViolation (~100 lines)
-│   └── context.rs       # SpanContext, SpanMetadata, SpanExtensions, ConcurrencyMetrics, CheckMetrics, StateMode, AttributeValue (~200 lines)
-├── policies/
+│   ├── origin.rs         # OriginRateLimiter (single domain)
+│   ├── registry.rs       # OriginRegistry (domain→limiter mapping, Middleware)
+│   ├── state.rs          # RateLimitViolation
+│   ├── policies.rs       # Policy, QuotaUnit, ServiceLimit (moved from policies/)
+│   ├── slots.rs          # PolicySlot (moved from policies/)
+│   ├── smoother.rs       # Smoother, SmootherConfig (moved from smoothing/)
+│   └── parsing.rs       # Header parsing functions (moved from parsing/)
+├── concurrency/
 │   ├── mod.rs
-│   ├── policy.rs
-│   └── slot.rs
-├── smoothing/
-│   ├── mod.rs
-│   └── smoother.rs
-├── tracing/
-│   ├── mod.rs
-│   ├── enricher/        # Extract ALL from origin_limiter.rs (~300 lines)
-│   │   ├── mod.rs
-│   │   ├── trait.rs      # SpanEnricher trait
-│   │   ├── minimal.rs    # MinimalSpanEnricher
-│   │   ├── standard.rs   # StandardSpanEnricher
-│   │   ├── smoother.rs   # SmootherEnricher
-│   │   ├── detailed.rs   # DetailedSpanEnricher
-│   │   ├── concurrency.rs # ConcurrencySpanEnricher
-│   │   ├── chain.rs      # ChainedEnricher, EnricherPresets
-│   │   └── impl.rs       # impl SpanEnricher for ChainedEnricher
-│   ├── legacy.rs        # RateLimitSpanBackend, RateLimitState, all backends
-│   └── middleware.rs    # Both telemetry middlewares (from tracing_middleware.rs)
-├── parsing/
-│   ├── mod.rs
-│   └── headers.rs       # All header parsing
-├── registry/
-│   ├── mod.rs
-│   └── origin.rs        # OriginRegistry
-└── middleware/
+│   ├── limiter.rs        # ConcurrencyRateLimiter
+│   └── registry.rs       # ConcurrencyRegistry
+└── tracing/
     ├── mod.rs
-    └── http.rs          # HttpApiRateLimiter
+    ├── policy.rs         # PolicyTracer
+    ├── smoother.rs       # SmootherTracer
+    ├── status.rs         # StatusTracer
+    └── concurrency.rs    # ConcurrencyTracer
 ```
 
 ## Detailed Breakdown
 
-### 1. `limiter/` Folder
+### 1. `origin/` Folder
 
-#### `limiter/origin.rs` (~300 lines)
-**Contains:**
-- `OriginRateLimiter` struct
-- Core rate limiting logic
-- `check()`, `wait()`, `state()` methods
-- Reconfigure logic
+All per-domain rate limiting functionality grouped together.
 
-**Extracts from:**
-- `origin_limiter.rs` - Main struct + methods
-
-#### `limiter/state.rs` (~100 lines)
-**Contains:**
-- `OriginRateLimiterState` struct
-- `RateLimitViolation` enum
-- Related state methods
-
-**Extracts from:**
-- `origin_limiter.rs` - State types + violation enum
-
-#### `limiter/context.rs` (~200 lines)
-**Contains:**
-- `SpanContext` struct
-- `SpanMetadata` struct
-- `SpanExtensions` struct
-- `ConcurrencyMetrics` struct
-- `CheckMetrics` struct
-- `StateMode` enum
-- `AttributeValue` enum
-- Associated `From` implementations
-
-**Extracts from:**
-- `origin_limiter.rs` - All context and type definitions
-
-### 2. `tracing/enricher/` Folder
-
-#### `tracing/enricher/mod.rs`
+#### `origin/mod.rs`
 **Contains:**
 - Module exports
-- Re-exports all enrichers and types
+- Re-exports: OriginRateLimiter, OriginRateLimiterBuilder, OriginRegistry, OriginRegistryBuilder
+- Re-exports: RateLimitViolation, Policy, QuotaUnit, ServiceLimit, PolicySlot
+- Re-exports: Smoother, SmootherConfig
+- Re-exports: parse_policy_header, parse_limit_header
 
-#### `tracing/enricher/trait.rs` (~30 lines)
+#### `origin/origin.rs` (~300 lines)
 **Contains:**
-- `SpanEnricher` trait definition
+- `OriginRateLimiter` struct
+- `OriginRateLimiterBuilder` struct
+- `check()`, `wait()` methods
+- `update_policies()`, `update_limits()` methods
+- Single domain rate limiting logic
 
-**Extracts from:**
-- `origin_limiter.rs` - Trait definition
+**Current state:**
+- Single domain limiter
+- `Arc<RwLock<Option<Smoother>>>` for smoother
+- `Arc<DashMap<String, PolicySlot>>` for policy slots
+- `ArcSwap<Option<String>>` for fastest policy tracking
 
-#### `tracing/enricher/minimal.rs` (~15 lines)
+#### `origin/registry.rs` (~150 lines)
 **Contains:**
-- `MinimalSpanEnricher` struct
-- `SpanEnricher` implementation
+- `OriginRegistry` struct (implements Middleware)
+- `OriginRegistryBuilder` struct
+- `get_limiter()` - Get or create per-domain limiter
+- `update_from_response()` - Update from HTTP headers
+- `origin_key()` - Generate domain key from URL
 
-**Extracts from:**
-- `origin_limiter.rs` - Enricher implementation
+**Key behavior:**
+- Middleware implementation extracts domain from request URL
+- Creates per-domain OriginRateLimiter instances on demand
+- Updates limiters from HTTP response headers
 
-#### `tracing/enricher/standard.rs` (~20 lines)
+#### `origin/state.rs` (~50 lines)
 **Contains:**
-- `StandardSpanEnricher` struct
-- `SpanEnricher` implementation
+- `RateLimitViolation` enum
 
-**Extracts from:**
-- `origin_limiter.rs` - Enricher implementation
-
-#### `tracing/enricher/smoother.rs` (~15 lines)
+#### `origin/policies.rs` (~100 lines)
 **Contains:**
-- `SmootherEnricher` struct
-- `SpanEnricher` implementation
-
-**Extracts from:**
-- `origin_limiter.rs` - Enricher implementation
-
-#### `tracing/enricher/detailed.rs` (~20 lines)
-**Contains:**
-- `DetailedSpanEnricher` struct
-- `SpanEnricher` implementation
-
-**Extracts from:**
-- `origin_limiter.rs` - Enricher implementation
-
-#### `tracing/enricher/concurrency.rs` (~15 lines)
-**Contains:**
-- `ConcurrencySpanEnricher` struct
-- `SpanEnricher` implementation
-
-**Extracts from:**
-- `origin_limiter.rs` - Enricher implementation
-
-#### `tracing/enricher/chain.rs` (~120 lines)
-**Contains:**
-- `ChainedEnricher` struct
-- `ChainedEnricher` methods (`new()`, `with_enricher()`, `with_enrichers()`, `with_dyn_enrichers()`, `build()`)
-- `EnricherPresets` struct
-- `EnricherPresets` methods (`minimal()`, `standard()`, `detailed()`, `production()`, `debug()`, `custom()`, `concurrency()`)
-- `impl SpanEnricher for ChainedEnricher`
-
-**Extracts from:**
-- `origin_limiter.rs` - Composition logic + presets
-
-### 3. `tracing/legacy.rs` (~150 lines)
-**Contains:**
-- `RateLimitSpanBackend` trait
-- `RateLimitState` struct
-- `MinimalSpanBackend` struct + implementation
-- `StandardSpanBackend` struct + implementation
-- `DetailedSpanBackend` struct + implementation
-- `NoOpSpanBackend` struct + implementation
+- `Policy` struct
+- `QuotaUnit` enum
+- `ServiceLimit` struct
 
 **Moves from:**
-- `tracing.rs` - All old tracing system
+- `policies/policy.rs`
 
-### 4. `tracing/middleware.rs` (~260 lines)
+#### `origin/slots.rs` (~150 lines)
 **Contains:**
-- `RateLimitTelemetry<S>` struct
-- `RateLimitTelemetry` methods
-- `ConcurrencyTelemetry` struct
-- `ConcurrencyTelemetry` methods
-- Middleware trait implementations for both
+- `PolicySlot` struct
+- Policy slot rate limiting logic
 
 **Moves from:**
-- `tracing_middleware.rs` - All telemetry middleware
+- `policies/slot.rs`
 
-### 5. Other Folders
+#### `origin/smoother.rs` (~200 lines)
+**Contains:**
+- `Smoother` struct
+- `SmootherConfig` struct
+- Smoothing algorithm
 
-#### `policies/mod.rs`, `policies/policy.rs`, `policies/slot.rs`
 **Moves from:**
-- `policy.rs` → `policies/policy.rs`
-- `policy_slot.rs` → `policies/slot.rs`
+- `smoothing/smoother.rs`
 
-#### `smoothing/mod.rs`, `smoothing/smoother.rs`
-**Moves from:**
-- `smoother.rs` → `smoothing/smoother.rs`
+#### `origin/parsing.rs` (~100 lines)
+**Contains:**
+- `parse_policy_header()` function
+- `parse_limit_header()` function
 
-#### `parsing/mod.rs`, `parsing/headers.rs`
 **Moves from:**
-- `parser.rs` → `parsing/headers.rs`
+- `parsing/headers.rs`
 
-#### `registry/mod.rs`, `registry/origin.rs`
-**Moves from:**
-- `origin_registry.rs` → `registry/origin.rs`
+### 2. `concurrency/` Folder
 
-#### `middleware/mod.rs`, `middleware/http.rs`
-**Moves from:**
-- `middleware.rs` → `middleware/http.rs`
+Concurrent request limiting with semaphores.
+
+#### `concurrency/mod.rs`
+**Contains:**
+- Module exports
+- Re-exports: ConcurrencyRateLimiter, ConcurrencyRateLimiterBuilder
+- Re-exports: ConcurrencyRegistry, ConcurrencyRegistryBuilder
+
+#### `concurrency/limiter.rs` (~175 lines)
+**Contains:**
+- `ConcurrencyRateLimiter` struct
+- `ConcurrencyRateLimiterBuilder` struct
+- `acquire_permit()` implementation
+- `set_url()`, `get_global_semaphore()`, `get_domain_semaphore()`
+- Middleware implementation
+
+**Current state:**
+- Uses internal `Arc<ConcurrencyRateLimiterInner>` for cheap cloning
+- Stores `current_url: Arc<RwLock<Option<Url>>>`
+- Delegates to ConcurrencyRegistry
+
+#### `concurrency/registry.rs` (~150 lines)
+**Contains:**
+- `ConcurrencyRegistry` struct
+- `ConcurrencyRegistryBuilder` struct
+- `get_global_semaphore()`
+- `get_domain_semaphore()`
+- `max_concurrent_global()`, `max_concurrent_per_domain()`
+
+**Current state:**
+- Manages global and per-domain semaphores
+- Creates semaphores on demand per domain
+
+### 3. `tracing/` Folder
+
+Tracer middleware for both systems.
+
+#### `tracing/mod.rs`
+**Contains:**
+- Module exports
+- Re-exports: PolicyTracer, SmootherTracer, StatusTracer, ConcurrencyTracer
+
+#### `tracing/policy.rs` (~50 lines)
+**Contains:**
+- `PolicyTracer` struct
+- Middleware implementation
+- Records policy-related span data
+
+#### `tracing/smoother.rs` (~30 lines)
+**Contains:**
+- `SmootherTracer` struct
+- Middleware implementation
+- Records smoother state to spans
+
+#### `tracing/status.rs` (~45 lines)
+**Contains:**
+- `StatusTracer` struct
+- Middleware implementation
+- Records rate limit status to spans
+
+#### `tracing/concurrency.rs` (~30 lines)
+**Contains:**
+- `ConcurrencyTracer` struct
+- Middleware implementation
+- Records concurrency metrics
 
 ## Implementation Steps
 
-### Phase 1: Create New Folder Structure
+### Phase 1: Move Files into `origin/`
 
-1. Create all new module folders
-2. Add empty `mod.rs` files
-3. Add module declarations in each `mod.rs`
+1. **Move `policies/policy.rs` → `origin/policies.rs`**
+   - Update all imports to `crate::origin::policies`
+   - Update `lib.rs` exports
 
-### Phase 2: Extract Tracing Enrichers
+2. **Move `policies/slot.rs` → `origin/slots.rs`**
+   - Update all imports to `crate::origin::slots`
+   - Update internal imports (PolicySlot → origin::policies)
 
-1. Create `tracing/enricher/trait.rs`
-   - Move `SpanEnricher` trait
-   - Verify trait compiles independently
+3. **Move `smoothing/smoother.rs` → `origin/smoother.rs`**
+   - Update all imports to `crate::origin::smoother`
+   - Update internal imports (Smoother → origin::smoother)
 
-2. Create individual enricher files
-   - `minimal.rs` - Move `MinimalSpanEnricher`
-   - `standard.rs` - Move `StandardSpanEnricher`
-   - `smoother.rs` - Move `SmootherEnricher`
-   - `detailed.rs` - Move `DetailedSpanEnricher`
-   - `concurrency.rs` - Move `ConcurrencySpanEnricher`
+4. **Move `parsing/headers.rs` → `origin/parsing.rs`**
+   - Update all imports to `crate::origin::parsing`
+   - Update internal imports
 
-3. Create `tracing/enricher/chain.rs`
-   - Move `ChainedEnricher` and `EnricherPresets`
-   - Test composition still works
+5. **Update `origin/mod.rs`**
+   - Add: `mod policies;`, `mod slots;`, `mod smoother;`, `mod parsing;`
+   - Re-export all public types
 
-4. Create `tracing/enricher/mod.rs`
-   - Re-export all enrichers and traits
-   - Ensure public API matches current
+6. **Update `lib.rs`**
+   - Remove references to old paths
+   - Export from new origin module
 
-5. Update `lib.rs`
-   - Update imports to use new paths
-   - Verify all public exports work
+7. **Run tests**
+   - Verify all imports updated correctly
 
-6. Run tests
-   - Ensure all enricher tests pass
+### Phase 2: Clean Up Old Directories
 
-### Phase 3: Extract Limiter Context Types
+1. **Remove `src/policies/` directory**
+   - Delete folder after successful move
 
-1. Create `limiter/context.rs`
-   - Move all context structs from `origin_limiter.rs`
-   - Move associated `From` implementations
+2. **Remove `src/smoothing/` directory**
+   - Delete folder after successful move
 
-2. Create `limiter/state.rs`
-   - Move `OriginRateLimiterState`
-   - Move `RateLimitViolation` enum
+3. **Remove `src/parsing/` directory**
+   - Delete folder after successful move
 
-3. Update imports in `limiter/origin.rs`
-   - Import from sibling modules
+4. **Remove `src/registry/origin.rs`**
+   - Delete old unused registry file
+   - Remove `src/registry/mod.rs` if only exporting old registry
 
-4. Run tests
-   - Ensure state-related tests pass
+5. **Update `lib.rs`**
+   - Remove old registry exports if still present
 
-### Phase 4: Move Other Components
+6. **Run tests**
+   - Ensure no broken references
 
-1. Move `policies/` folder
-2. Move `smoothing/` folder
-3. Move `parsing/` folder
-4. Move `registry/` folder
-5. Move `middleware/` folder
+### Phase 3: Final Verification
 
-6. Update all imports across codebase
+1. **Check all imports**
+   - Run `cargo check` for errors
+   - Fix any remaining references
 
-7. Run all tests
-   - Verify no broken imports
+2. **Run full test suite**
+   - `cargo test`
+   - All tests should pass
 
-### Phase 5: Consolidate Tracing System
+3. **Verify exports**
+   - `cargo doc --open`
+   - Check public API is intact
 
-1. Move legacy tracing to `tracing/legacy.rs`
-2. Move telemetry middlewares to `tracing/middleware.rs`
-3. Delete old `tracing.rs` and `tracing_middleware.rs`
-4. Update `lib.rs` imports
-5. Run integration tests
-
-### Phase 6: Final Cleanup
-
-1. Delete `origin_limiter.rs` (should be empty or near-empty)
-2. Verify all files are under 300 lines
-3. Run full test suite
-4. Update documentation (README) with new structure
+4. **Update documentation**
+   - Update README with new structure
+   - Update AGENTS.md if needed
 
 ## Benefits
 
 ### Immediate Wins
 
-1. **origin_limiter.rs goes from 1008 lines to ~300**
-   - Extract ~300 lines to `tracing/enricher/`
-   - Extract ~200 lines to `limiter/context.rs`
-   - Extract ~100 lines to `limiter/state.rs`
+1. **Logical grouping**
+   - All origin-related code in `origin/`
+   - Clear ownership: parsing, policies, smoothing belong to origin
 
-2. **Clearer navigation**
-   - Enrichers in dedicated folder
-   - Context types isolated
-   - Related components grouped
+2. **Reduced directory depth**
+   - From `origin/policies/policy.rs` to `origin/policies.rs`
+   - Simpler navigation
 
-3. **Easier testing**
-   - Each enricher can be tested independently
-   - Context types have their own test module
-   - Smaller test files per concern
+3. **Clearer architecture**
+   - Two main systems: origin and concurrency
+   - Each is self-contained
 
-4. **Better code review**
-   - PRs can focus on specific folders
-   - Smaller diffs per file
-   - Easier to review changes
+4. **Single responsibility**
+   - `origin/` - Per-domain rate limiting
+   - `concurrency/` - Concurrent request limiting
+   - `tracing/` - Telemetry for both
 
 ### Long-term Benefits
 
-1. **Scalable structure**
-   - New enrichers go to `tracing/enricher/`
-   - New policies go to `policies/`
-   - Clear location for new features
+1. **Easier onboarding**
+   - New contributors find related code together
+   - Clear boundaries between systems
 
-2. **Maintainability**
-   - Easier to find specific functionality
-   - Smaller files are easier to understand
-   - Reduced merge conflicts
+2. **Better maintainability**
+   - Changes to origin are isolated to `origin/`
+   - Changes to concurrency are isolated to `concurrency/`
 
-3. **Onboarding**
-   - New contributors can navigate structure faster
-   - Clear separation of concerns
-   - Logical grouping of related code
-
-4. **Test organization**
-   - Tests can mirror module structure
-   - Clear test scope per module
-   - Easier to add focused tests
+3. **Simpler refactoring**
+   - Moving between files in same directory is easier
+   - Module structure is flatter
 
 ## Risks and Mitigations
 
-### Risk: Breaking Changes to Public API
+### Risk: Breaking Imports
 
 **Mitigation:**
-- Re-export everything through `lib.rs`
-- Maintain same public paths for types
-- Verify all examples in README compile
-
-### Risk: Circular Dependencies
-
-**Mitigation:**
-- Careful import structure
-- Use `mod.rs` for module-level re-exports
-- Test incrementally after each move
+- Update imports as we move each file
+- Use `cargo check` after each move
+- Keep tests updated
 
 ### Risk: Test Failures
 
 **Mitigation:**
 - Run tests after each phase
-- Keep tests in same file as implementation
 - Update test imports as code moves
+- Keep test modules in same file as implementation
 
-### Risk: Merge Conflicts
+### Risk: Circular Dependencies
 
 **Mitigation:**
-- Complete refactor in single session
-- Commit frequently after each phase
-- Use `jj log` to track progress
+- Careful import structure
+- Use `crate::origin::*` pattern where possible
+- Test after each move
 
 ## Success Criteria
 
-- [ ] All files under 300 lines (origin_limiter.rs reduced by 70%+)
-- [ ] All 73+ tests passing
-- [ ] No circular dependencies
+- [ ] `origin/` contains all origin-related code
+- [ ] `concurrency/` contains all concurrency-related code
+- [ ] `tracing/` contains all tracers
+- [ ] Old directories removed (policies/, smoothing/, parsing/, registry/)
+- [ ] All imports updated
+- [ ] `cargo check` passes
+- [ ] `cargo test` passes
 - [ ] Public API unchanged (same exports from lib.rs)
-- [ ] README examples still compile
-- [ ] Documentation reflects new structure
-- [ ] No compiler warnings
-- [ ] All imports updated correctly
-
-## Future Considerations
-
-After completing this refactoring, consider:
-
-1. **Option 1 or Option 2** - Deeper restructuring if project grows
-2. **Module-level documentation** - Add `//!` docs to each module
-3. **Internal visibility** - Use `pub(crate)` for implementation details
-4. **Test modules** - Separate `tests/` modules for integration tests
-5. **Examples** - Add `examples/` folder with usage patterns
+- [ ] README updated with new structure
 
 ## Related Work
 
-- **PLAN-filetree-refactor.md** - This document
 - **README.md** - Needs updates to reflect new structure
-- **AGENTS.md** - Agent instructions for project
+- **AGENTS.md** - May need updates to reflect module paths

@@ -1,7 +1,7 @@
 pub mod origin;
 pub mod state;
-pub mod middleware;
+pub mod registry;
 
 pub use origin::{OriginRateLimiter, OriginRateLimiterBuilder};
+pub use registry::{OriginRegistry, OriginRegistryBuilder};
 pub use state::RateLimitViolation;
-pub use middleware::OriginLimiterMiddleware;

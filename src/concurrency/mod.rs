@@ -1,5 +1,5 @@
 pub mod limiter;
-pub mod middleware;
+pub mod registry;
 
 pub use limiter::{ConcurrencyRateLimiter, ConcurrencyRateLimiterBuilder};
-pub use middleware::ConcurrencyLimiterMiddleware;
+pub use registry::{ConcurrencyRegistry, ConcurrencyRegistryBuilder};

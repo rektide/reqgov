@@ -6,9 +6,8 @@ mod registry;
 mod concurrency;
 mod tracing;
 
-pub use origin::{OriginRateLimiter, OriginRateLimiterBuilder, RateLimitViolation, OriginLimiterMiddleware};
-pub use concurrency::{ConcurrencyRateLimiter, ConcurrencyRateLimiterBuilder, ConcurrencyLimiterMiddleware};
-pub use registry::{OriginRegistry, OriginRegistryBuilder};
+pub use origin::{OriginRateLimiter, OriginRateLimiterBuilder, OriginRegistry, OriginRegistryBuilder, RateLimitViolation};
+pub use concurrency::{ConcurrencyRateLimiter, ConcurrencyRateLimiterBuilder, ConcurrencyRegistry, ConcurrencyRegistryBuilder};
 pub use parsing::{parse_limit_header, parse_policy_header};
 pub use policies::{Policy, QuotaUnit, ServiceLimit, PolicySlot};
 pub use smoothing::{Smoother, SmootherConfig};

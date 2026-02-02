@@ -1,14 +1,13 @@
 mod integration_tests {
     use reqgov::{
-        OriginLimiterMiddleware, OriginRateLimiter, Policy, PolicyTracer, QuotaUnit,
-        SmootherConfig, SmootherTracer, StatusTracer,
+        OriginRateLimiter, Policy, PolicyTracer, QuotaUnit, SmootherConfig, SmootherTracer,
+        StatusTracer,
     };
     use std::sync::Arc;
 
     #[test]
     fn test_rate_limit_tracing_creation() {
-        let limiter = Arc::new(OriginRateLimiter::new());
-        let _tracing = OriginLimiterMiddleware::new(limiter);
+        let _limiter: Arc<OriginRateLimiter> = Arc::new(OriginRateLimiter::new());
     }
 
     #[test]
@@ -33,7 +32,6 @@ mod integration_tests {
                 .smoother(SmootherConfig::default())
                 .build(),
         );
-        let _tracing = OriginLimiterMiddleware::new(limiter.clone());
 
         assert!(limiter.smoother().is_some());
     }

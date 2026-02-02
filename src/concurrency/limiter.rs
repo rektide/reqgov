@@ -1,20 +1,13 @@
-use crate::registry::origin::OriginRegistry;
+use crate::concurrency::registry::ConcurrencyRegistry;
+use http::Extensions;
+use reqwest_middleware::{Middleware, Next, Result};
 use std::sync::Arc;
 
+#[derive(Default)]
 pub struct ConcurrencyRateLimiterBuilder {
-    registry: Option<Arc<OriginRegistry>>,
+    registry: Option<Arc<ConcurrencyRegistry>>,
     max_concurrent_global: Option<usize>,
     max_concurrent_per_domain: Option<usize>,
-}
-
-impl Default for ConcurrencyRateLimiterBuilder {
-    fn default() -> Self {
-        Self {
-            registry: None,
-            max_concurrent_global: None,
-            max_concurrent_per_domain: None,
-        }
-    }
 }
 
 impl ConcurrencyRateLimiterBuilder {
@@ -22,7 +15,7 @@ impl ConcurrencyRateLimiterBuilder {
         Self::default()
     }
 
-    pub fn registry(mut self, registry: Arc<OriginRegistry>) -> Self {
+    pub fn registry(mut self, registry: Arc<ConcurrencyRegistry>) -> Self {
         self.registry = Some(registry);
         self
     }
@@ -39,7 +32,7 @@ impl ConcurrencyRateLimiterBuilder {
 
     pub fn build(self) -> ConcurrencyRateLimiter {
         let registry = self.registry.unwrap_or_else(|| {
-            let mut builder = OriginRegistry::builder();
+            let mut builder = ConcurrencyRegistry::builder();
             if let Some(max) = self.max_concurrent_global {
                 builder = builder.max_concurrent_global(max);
             }
@@ -50,15 +43,24 @@ impl ConcurrencyRateLimiterBuilder {
         });
 
         ConcurrencyRateLimiter {
-            registry,
-            current_url: Arc::new(tokio::sync::RwLock::new(None)),
+            inner: Arc::new(ConcurrencyRateLimiterInner {
+                registry,
+                current_url: tokio::sync::RwLock::new(None),
+            }),
         }
     }
 }
 
+struct ConcurrencyRateLimiterInner {
+    registry: Arc<ConcurrencyRegistry>,
+    current_url: tokio::sync::RwLock<Option<url::Url>>,
+}
+
+/// Concurrency rate limiter with internal Arc for cheap cloning.
+/// Can be used directly as reqwest middleware.
+#[derive(Clone)]
 pub struct ConcurrencyRateLimiter {
-    registry: Arc<OriginRegistry>,
-    current_url: Arc<tokio::sync::RwLock<Option<url::Url>>>,
+    inner: Arc<ConcurrencyRateLimiterInner>,
 }
 
 impl ConcurrencyRateLimiter {
@@ -66,42 +68,55 @@ impl ConcurrencyRateLimiter {
         ConcurrencyRateLimiterBuilder::new()
     }
 
-    pub fn registry(&self) -> &Arc<OriginRegistry> {
-        &self.registry
+    pub fn registry(&self) -> &Arc<ConcurrencyRegistry> {
+        &self.inner.registry
     }
 
     pub async fn set_url(&self, url: url::Url) {
-        *self.current_url.write().await = Some(url);
+        *self.inner.current_url.write().await = Some(url);
     }
 
     pub async fn get_global_semaphore(&self) -> Arc<tokio::sync::Semaphore> {
-        self.registry.get_global_semaphore().await
+        self.inner.registry.get_global_semaphore().await
     }
 
     pub async fn get_domain_semaphore(&self, url: &url::Url) -> Arc<tokio::sync::Semaphore> {
-        self.registry.get_domain_semaphore(url).await
+        self.inner.registry.get_domain_semaphore(url).await
     }
 
     pub fn max_concurrent_global(&self) -> Option<usize> {
-        self.registry.max_concurrent_global()
+        self.inner.registry.max_concurrent_global()
     }
 
     pub fn max_concurrent_per_domain(&self) -> Option<usize> {
-        self.registry.max_concurrent_per_domain()
+        self.inner.registry.max_concurrent_per_domain()
     }
 }
 
 impl reqwest_ratelimit::RateLimiter for ConcurrencyRateLimiter {
     fn acquire_permit(&self) -> impl std::future::Future<Output = ()> + Send + '_ {
         async move {
-            if let Some(ref url) = *self.current_url.read().await {
-                let global_semaphore = self.registry.get_global_semaphore().await;
-                let domain_semaphore = self.registry.get_domain_semaphore(url).await;
+            if let Some(ref url) = *self.inner.current_url.read().await {
+                let global_semaphore = self.inner.registry.get_global_semaphore().await;
+                let domain_semaphore = self.inner.registry.get_domain_semaphore(url).await;
 
                 let _global_permit = global_semaphore.acquire().await.unwrap();
                 let _domain_permit = domain_semaphore.acquire().await.unwrap();
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl Middleware for ConcurrencyRateLimiter {
+    async fn handle(
+        &self,
+        req: reqwest_middleware::reqwest::Request,
+        extensions: &mut Extensions,
+        next: Next<'_>,
+    ) -> Result<reqwest_middleware::reqwest::Response> {
+        extensions.insert(self.clone());
+        next.run(req, extensions).await
     }
 }
 
@@ -148,5 +163,11 @@ mod tests {
 
         let _global = limiter.get_global_semaphore().await;
         let _domain = limiter.get_domain_semaphore(&url).await;
+    }
+
+    #[test]
+    fn test_limiter_is_clone() {
+        let limiter = ConcurrencyRateLimiter::builder().build();
+        let _cloned = limiter.clone();
     }
 }

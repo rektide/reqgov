@@ -16,7 +16,7 @@ impl Middleware for StatusTracer {
     ) -> Result<reqwest_middleware::reqwest::Response> {
         if let Some(limiter) = extensions.get::<Arc<OriginRateLimiter>>() {
             let span = tracing::Span::current();
-            match limiter.check() {
+            match limiter.check().await {
                 Ok(()) => {
                     span.record("rate_limit.allowed", true);
                     span.record("rate_limit.blocked", false);

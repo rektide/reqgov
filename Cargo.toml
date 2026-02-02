@@ -11,8 +11,10 @@ name = "reqgov"
 path = "src/lib.rs"
 
 [dependencies]
+arc-swap = "1.8.0"
 async-trait = "0.1"
 base64 = "0.22"
+dashmap = "6.1.0"
 governor = "0.10"
 http = "1.1"
 reqwest-middleware = "0.5"
