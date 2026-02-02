@@ -63,20 +63,52 @@ impl OriginLimiter {
     }
 
     pub async fn check(&self) -> Result<(), RateLimitViolation> {
-        for r in self.slots.iter() {
-            if let Err(not_until) = r.value().check() {
-                return Err(RateLimitViolation::PolicyExceeded {
-                    policy_name: r.key().clone(),
-                    wait_duration: not_until.wait_time_from(r.value().clock().now()),
-                });
+        let mut policy_names: Vec<String> = self.slots.iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        policy_names.sort_by(|a, b| {
+            let window_a = self.slots.get(a)
+                .and_then(|slot| slot.policy.window_secs)
+                .unwrap_or(60);
+            let window_b = self.slots.get(b)
+                .and_then(|slot| slot.policy.window_secs)
+                .unwrap_or(60);
+            window_a.cmp(&window_b)
+        });
+
+        for name in policy_names {
+            if let Some(slot) = self.slots.get(&name) {
+                if let Err(not_until) = slot.check() {
+                    return Err(RateLimitViolation::PolicyExceeded {
+                        policy_name: name,
+                        wait_duration: not_until.wait_time_from(slot.clock().now()),
+                    });
+                }
             }
         }
         Ok(())
     }
 
     pub async fn wait(&self) {
-        for r in self.slots.iter() {
-            r.value().wait().await;
+        let mut policy_names: Vec<String> = self.slots.iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        policy_names.sort_by(|a, b| {
+            let window_a = self.slots.get(a)
+                .and_then(|slot| slot.policy.window_secs)
+                .unwrap_or(60);
+            let window_b = self.slots.get(b)
+                .and_then(|slot| slot.policy.window_secs)
+                .unwrap_or(60);
+            window_a.cmp(&window_b)
+        });
+
+        for name in policy_names {
+            if let Some(slot) = self.slots.get(&name) {
+                slot.wait().await;
+            }
         }
     }
 }
