@@ -8,6 +8,8 @@ use std::num::NonZeroU32;
 use std::sync::Mutex;
 use bon::Builder;
 
+use crate::origin::policies::Policy;
+
 #[derive(Debug, Clone, Copy, Builder)]
 pub struct SmootherConfig {
     pub micro_interval_secs: u32,
@@ -67,6 +69,10 @@ impl Smoother {
         self.governor = RateLimiter::direct(Quota::per_second(rps))
             .with_middleware::<StateInformationMiddleware>();
         *self.last_snapshot.lock().unwrap() = None; // Clear cached snapshot on reconfigure
+    }
+
+    pub fn configure_from_policy(&mut self, policy: &Policy) {
+        self.configure(policy.quota, policy.window_secs.unwrap_or(60));
     }
 
     pub fn check(&self) -> Result<StateSnapshot, NotUntil<<DefaultClock as Clock>::Instant>> {
