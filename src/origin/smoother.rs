@@ -6,6 +6,7 @@ use governor::{Quota, NotUntil};
 use governor::middleware::StateSnapshot;
 use std::num::NonZeroU32;
 use std::sync::Mutex;
+use std::time::Duration;
 use bon::Builder;
 
 use crate::origin::policies::Policy;
@@ -84,8 +85,10 @@ impl Smoother {
         result
     }
 
-    pub async fn wait(&self) {
+    pub async fn wait(&self) -> Duration {
+        let start = std::time::Instant::now();
         self.governor.until_ready().await;
+        start.elapsed()
     }
 
     pub fn clock(&self) -> &DefaultClock {

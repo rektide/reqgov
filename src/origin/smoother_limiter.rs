@@ -3,6 +3,7 @@ use crate::origin::policies::{Policy, ServiceLimit};
 use crate::origin::smoother::{Smoother, SmootherConfig};
 use governor::clock::Clock;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Default)]
 pub struct SmootherLimiterBuilder {
@@ -58,9 +59,11 @@ impl SmootherLimiter {
         Ok(())
     }
 
-    pub async fn wait(&self) {
+    pub async fn wait(&self) -> Duration {
         if let Some(smoother) = self.smoother.write().await.as_mut() {
-            smoother.wait().await;
+            smoother.wait().await
+        } else {
+            Duration::ZERO
         }
     }
 

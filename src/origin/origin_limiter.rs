@@ -3,6 +3,7 @@ use crate::origin::policies::{Policy, ServiceLimit};
 use crate::origin::slots::PolicySlot;
 use governor::clock::Clock;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 #[derive(Default)]
@@ -98,12 +99,14 @@ impl OriginLimiter {
         Ok(())
     }
 
-    pub async fn wait(&self) {
+    pub async fn wait(&self) -> Duration {
         let slots = self.slots.lock().await;
+        let mut total_wait = Duration::ZERO;
 
         for slot in slots.iter() {
-            slot.wait().await;
+            total_wait += slot.wait().await;
         }
+        total_wait
     }
 }
 

@@ -72,8 +72,10 @@ impl PolicySlot {
         result
     }
 
-    pub async fn wait(&self) {
+    pub async fn wait(&self) -> Duration {
+        let start = std::time::Instant::now();
         self.governor.until_ready().await;
+        start.elapsed()
     }
 
     pub fn clock(&self) -> &DefaultClock {

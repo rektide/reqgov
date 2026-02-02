@@ -84,27 +84,33 @@ impl OriginRegistry {
     }
 
     pub async fn wait(&self, url: &Url) -> RateLimitCheckResult {
-        let start = std::time::Instant::now();
         let key = origin_key(url);
 
-        self.origin_limiters.entry(key.clone())
+        let origin_wait_duration = self.origin_limiters.entry(key.clone())
             .or_insert_with(|| Arc::new(OriginLimiter::new()))
             .value()
             .wait()
             .await;
 
-        if let Some(config) = &self.smoother_config {
+        let smoother_wait_duration = if let Some(config) = &self.smoother_config {
             self.smoother_limiters.entry(key)
                 .or_insert_with(|| Arc::new(SmootherLimiter::builder().config(config.clone()).build()))
                 .value()
                 .wait()
-            .await;
-        }
+                .await
+        } else {
+            std::time::Duration::ZERO
+        };
 
-        let wait_duration = start.elapsed();
+        let total_wait = origin_wait_duration + smoother_wait_duration;
+        let wait_count = if total_wait.as_millis() > 0 { 1 } else { 0 };
 
-        if wait_duration.as_millis() > 0 {
-            RateLimitCheckResult::blocked(wait_duration)
+        if total_wait.as_millis() > 0 {
+            RateLimitCheckResult::builder()
+                .allowed(false)
+                .wait_duration(total_wait)
+                .wait_count(wait_count)
+                .build()
         } else {
             RateLimitCheckResult::allowed()
         }
