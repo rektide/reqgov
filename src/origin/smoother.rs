@@ -1,11 +1,14 @@
 use governor::clock::{Clock, DefaultClock};
-use governor::middleware::{StateInformationMiddleware, StateSnapshot};
+use governor::RateLimiter;
 use governor::state::InMemoryState;
-use governor::{NotUntil, Quota, RateLimiter};
-use std::sync::Mutex;
+use governor::middleware::StateInformationMiddleware;
+use governor::{Quota, NotUntil};
+use governor::middleware::StateSnapshot;
 use std::num::NonZeroU32;
+use std::sync::Mutex;
+use bon::Builder;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Builder)]
 pub struct SmootherConfig {
     pub micro_interval_secs: u32,
     pub velocity: f64,
@@ -99,10 +102,10 @@ mod tests {
 
     #[test]
     fn test_smoother_custom_config() {
-        let config = SmootherConfig {
-            micro_interval_secs: 5,
-            velocity: 2.0,
-        };
+        let config = SmootherConfig::builder()
+            .micro_interval_secs(5)
+            .velocity(2.0)
+            .build();
         let smoother = Smoother::new(config);
         assert_eq!(smoother.micro_interval_secs, 5);
         assert_eq!(smoother.velocity, 2.0);
@@ -118,10 +121,10 @@ mod tests {
 
     #[test]
     fn test_smoother_velocity_multiplier() {
-        let config = SmootherConfig {
-            micro_interval_secs: 2,
-            velocity: 2.0,
-        };
+        let config = SmootherConfig::builder()
+            .micro_interval_secs(2)
+            .velocity(2.0)
+            .build();
         let mut smoother = Smoother::new(config);
 
         smoother.configure(100, 60);
@@ -132,10 +135,10 @@ mod tests {
 
     #[test]
     fn test_smoother_conservative_velocity() {
-        let config = SmootherConfig {
-            micro_interval_secs: 1,
-            velocity: 0.5,
-        };
+        let config = SmootherConfig::builder()
+            .micro_interval_secs(1)
+            .velocity(0.5)
+            .build();
         let mut smoother = Smoother::new(config);
         smoother.configure(50, 60);
 
@@ -151,10 +154,10 @@ mod tests {
 
     #[test]
     fn test_smoother_custom_interval() {
-        let config = SmootherConfig {
-            micro_interval_secs: 10,
-            velocity: 1.0,
-        };
+        let config = SmootherConfig::builder()
+            .micro_interval_secs(10)
+            .velocity(1.0)
+            .build();
         let mut smoother = Smoother::new(config);
         smoother.configure(1000, 3600);
         assert_eq!(smoother.base_window_secs, 3600);
