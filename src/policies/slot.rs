@@ -7,16 +7,6 @@ use std::sync::Mutex;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-/// State snapshot for telemetry
-#[derive(Debug, Clone)]
-pub struct PolicySlotState {
-    pub name: String,
-    pub quota: u32,
-    pub remaining: u32,
-    pub window_secs: u32,
-    pub reset_at: Option<std::time::Instant>,
-}
-
 pub struct PolicySlot {
     pub policy: Policy,
     pub remaining: u32,
@@ -90,21 +80,14 @@ impl PolicySlot {
         self.governor.clock()
     }
 
-    /// Get state snapshot for telemetry
-    pub fn state(&self) -> PolicySlotState {
-        let snapshot = self.last_snapshot.lock().unwrap();
-        let governor_remaining = snapshot
+    /// Get governor remaining from last snapshot
+    pub fn governor_remaining(&self) -> u32 {
+        self.last_snapshot
+            .lock()
+            .unwrap()
             .as_ref()
             .map(|s| s.remaining_burst_capacity())
-            .unwrap_or(self.remaining);
-
-        PolicySlotState {
-            name: self.policy.name.clone(),
-            quota: self.policy.quota,
-            remaining: governor_remaining,
-            window_secs: self.policy.window_secs.unwrap_or(60),
-            reset_at: self.reset_at,
-        }
+            .unwrap_or(self.remaining)
     }
 }
 

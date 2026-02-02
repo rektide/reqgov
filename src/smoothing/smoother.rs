@@ -11,15 +11,6 @@ pub struct SmootherConfig {
     pub velocity: f64,
 }
 
-/// State snapshot for telemetry
-#[derive(Debug, Clone, Copy)]
-pub struct SmootherState {
-    pub remaining_per_interval: f64,
-    pub micro_interval_secs: u32,
-    pub velocity: f64,
-    pub base_window_secs: u32,
-}
-
 impl Default for SmootherConfig {
     fn default() -> Self {
         Self {
@@ -33,9 +24,9 @@ pub struct Smoother {
     governor: RateLimiter<governor::state::NotKeyed, InMemoryState, DefaultClock, StateInformationMiddleware>,
     last_snapshot: Mutex<Option<StateSnapshot>>,
 
-    base_window_secs: u32,
-    micro_interval_secs: u32,
-    velocity: f64,
+    pub base_window_secs: u32,
+    pub micro_interval_secs: u32,
+    pub velocity: f64,
 }
 
 impl Smoother {
@@ -49,22 +40,15 @@ impl Smoother {
             velocity: config.velocity,
         }
     }
-    
-    /// Get state snapshot for telemetry
-    pub fn state(&self) -> SmootherState {
-        // Use actual governor state from cached snapshot
-        let snapshot = self.last_snapshot.lock().unwrap();
-        let remaining = snapshot
-            .as_ref()
-            .map(|s| s.remaining_burst_capacity() as f64)
-            .unwrap_or(0.0);
 
-        SmootherState {
-            remaining_per_interval: remaining,
-            micro_interval_secs: self.micro_interval_secs,
-            velocity: self.velocity,
-            base_window_secs: self.base_window_secs,
-        }
+    /// Get remaining from governor snapshot
+    pub fn remaining(&self) -> u32 {
+        self.last_snapshot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.remaining_burst_capacity())
+            .unwrap_or(0)
     }
 
     pub fn configure(&mut self, remaining: u32, window_secs: u32) {

@@ -1,110 +1,68 @@
 mod integration_tests {
     use reqgov::{
-        DetailedSpanBackend, MinimalSpanBackend, NoOpSpanBackend, PolicySlotState,
-        RateLimitSpanBackend, RateLimitState, SmootherState, StandardSpanBackend,
+        OriginRateLimiter, Policy, QuotaUnit, SmootherConfig,
+        PolicyTracing, SmootherTracing, StatusTracing, RateLimitTracing,
     };
+    use std::sync::Arc;
 
     #[test]
-    fn test_rate_limit_span_backend_enriches_span() {
-        let span = tracing::Span::current();
-        let state = RateLimitState {
-            origin: Some("api.example.com".to_string()),
-            smoother: Some(SmootherState {
-                remaining_per_interval: 1.5,
-                micro_interval_secs: 2,
-                velocity: 1.5,
-                base_window_secs: 60,
-            }),
-            policies: vec![PolicySlotState {
-                name: "burst".to_string(),
-                quota: 100,
-                remaining: 75,
-                window_secs: 60,
-                reset_at: None,
-            }],
-            will_throttle: true,
-            throttle_wait_duration: Some(std::time::Duration::from_secs(2)),
-        };
-
-        MinimalSpanBackend.enrich_span(&state);
-        let _ = span;
+    fn test_rate_limit_tracing_creation() {
+        let limiter = Arc::new(OriginRateLimiter::new());
+        let _tracing = RateLimitTracing::new(limiter);
     }
 
     #[test]
-    fn test_standard_span_backend_enriches_span() {
-        let span = tracing::Span::current();
-        let state = RateLimitState {
-            origin: Some("api.github.com".to_string()),
-            smoother: Some(SmootherState {
-                remaining_per_interval: 2.0,
-                micro_interval_secs: 2,
-                velocity: 1.5,
-                base_window_secs: 60,
-            }),
-            policies: vec![
-                PolicySlotState {
-                    name: "burst".to_string(),
-                    quota: 100,
-                    remaining: 45,
-                    window_secs: 60,
-                    reset_at: None,
-                },
-                PolicySlotState {
-                    name: "daily".to_string(),
-                    quota: 10000,
-                    remaining: 8500,
-                    window_secs: 86400,
-                    reset_at: Some(
-                        std::time::Instant::now() + std::time::Duration::from_secs(3600),
-                    ),
-                },
-            ],
-            will_throttle: false,
-            throttle_wait_duration: None,
-        };
-
-        StandardSpanBackend.enrich_span(&state);
-        let _ = span;
+    fn test_policy_tracing_creation() {
+        let _tracing = PolicyTracing;
     }
 
     #[test]
-    fn test_detailed_span_backend_enriches_span() {
-        let span = tracing::Span::current();
-        let reset_time = std::time::Instant::now() + std::time::Duration::from_secs(300);
-        let state = RateLimitState {
-            origin: Some("api.gitlab.com".to_string()),
-            smoother: Some(SmootherState {
-                remaining_per_interval: 2.5,
-                micro_interval_secs: 3,
-                velocity: 2.0,
-                base_window_secs: 60,
-            }),
-            policies: vec![PolicySlotState {
-                name: "burst".to_string(),
-                quota: 500,
-                remaining: 250,
-                window_secs: 300,
-                reset_at: Some(reset_time),
-            }],
-            will_throttle: true,
-            throttle_wait_duration: Some(std::time::Duration::from_millis(1500)),
-        };
-
-        DetailedSpanBackend.enrich_span(&state);
-        let _ = span;
+    fn test_smoother_tracing_creation() {
+        let _tracing = SmootherTracing;
     }
 
     #[test]
-    fn test_noop_span_backend_does_nothing() {
-        let state = RateLimitState {
-            origin: None,
-            smoother: None,
-            policies: vec![],
-            will_throttle: false,
-            throttle_wait_duration: None,
-        };
+    fn test_status_tracing_creation() {
+        let _tracing = StatusTracing;
+    }
 
-        NoOpSpanBackend.enrich_span(&state);
-        // No assertion needed - just verify no panic occurs
+    #[test]
+    fn test_limiter_with_smoother_for_tracing() {
+        let limiter = Arc::new(OriginRateLimiter::with_smoother(SmootherConfig::default()));
+        let _tracing = RateLimitTracing::new(limiter.clone());
+        
+        assert!(limiter.smoother().is_some());
+    }
+
+    #[test]
+    fn test_limiter_slots_accessible_for_tracing() {
+        let mut limiter = OriginRateLimiter::new();
+        limiter.update_policies(vec![Policy {
+            name: "burst".to_string(),
+            quota: 100,
+            window_secs: Some(60),
+            quota_unit: QuotaUnit::Requests,
+            partition_key: None,
+        }]);
+
+        let slots: Vec<_> = limiter.slots().collect();
+        assert_eq!(slots.len(), 1);
+        
+        let (name, slot) = &slots[0];
+        assert_eq!(*name, "burst");
+        assert_eq!(slot.policy.quota, 100);
+    }
+
+    #[test]
+    fn test_smoother_fields_accessible_for_tracing() {
+        let limiter = OriginRateLimiter::with_smoother(SmootherConfig {
+            micro_interval_secs: 5,
+            velocity: 2.0,
+        });
+
+        let smoother = limiter.smoother().unwrap();
+        assert_eq!(smoother.micro_interval_secs, 5);
+        assert_eq!(smoother.velocity, 2.0);
+        assert_eq!(smoother.base_window_secs, 60);
     }
 }
