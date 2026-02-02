@@ -1,4 +1,4 @@
-use crate::origin::{OriginLimiter, Policy, ServiceLimit, RateLimitViolation, PolicySlot};
+use super::{OriginLimiter, Policy, ServiceLimit, RateLimitViolation, PolicySlot};
 use std::sync::Arc;
 
 pub struct OriginLimiterTracer {
