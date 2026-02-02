@@ -1,20 +1,20 @@
-use crate::middleware::http::HttpApiRateLimiter;
+use crate::concurrency::limiter::ConcurrencyRateLimiter;
 use http::Extensions;
 use reqwest_middleware::{Middleware, Next, Result};
 use std::sync::Arc;
 use std::time::Instant;
 
-pub struct ConcurrencyTracing;
+pub struct ConcurrencyTracer;
 
 #[async_trait::async_trait]
-impl Middleware for ConcurrencyTracing {
+impl Middleware for ConcurrencyTracer {
     async fn handle(
         &self,
         req: reqwest_middleware::reqwest::Request,
         extensions: &mut Extensions,
         next: Next<'_>,
     ) -> Result<reqwest_middleware::reqwest::Response> {
-        if let Some(rate_limiter) = extensions.get::<Arc<HttpApiRateLimiter>>() {
+        if let Some(rate_limiter) = extensions.get::<Arc<ConcurrencyRateLimiter>>() {
             let url = req.url().clone();
             let registry = rate_limiter.registry();
 

@@ -1,4 +1,4 @@
-use crate::limiter::state::RateLimitViolation;
+use crate::origin::state::RateLimitViolation;
 use crate::policies::policy::Policy;
 use crate::policies::slot::PolicySlot;
 use crate::smoothing::smoother::{Smoother, SmootherConfig};

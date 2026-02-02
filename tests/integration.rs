@@ -1,17 +1,25 @@
-use reqgov::{HttpApiRateLimiter, OriginRegistry, SmootherConfig};
+use reqgov::{ConcurrencyRateLimiter, OriginRateLimiter, OriginRegistry, SmootherConfig};
 use reqwest_ratelimit::RateLimiter;
 use std::sync::Arc;
 
 #[tokio::test]
 async fn test_http_api_limiter_full_flow() {
-    let limiter = HttpApiRateLimiter::builder()
-        .smoother(SmootherConfig::default())
-        .build();
+    let registry = Arc::new(
+        OriginRegistry::builder()
+            .smoother(SmootherConfig::default())
+            .build()
+    );
+
+    let concurrency_limiter = Arc::new(
+        ConcurrencyRateLimiter::builder()
+            .registry(registry)
+            .build()
+    );
 
     let url = url::Url::parse("https://api.example.com/test").unwrap();
-    limiter.set_url(url.clone()).await;
+    concurrency_limiter.set_url(url.clone()).await;
 
-    limiter.acquire_permit().await;
+    concurrency_limiter.acquire_permit().await;
 }
 
 #[tokio::test]
@@ -109,9 +117,15 @@ async fn test_registry_concurrent_access() {
 
 #[tokio::test]
 async fn test_http_api_limiter_concurrent_requests() {
-    let limiter = Arc::new(
-        HttpApiRateLimiter::builder()
+    let registry = Arc::new(
+        OriginRegistry::builder()
             .smoother(SmootherConfig::default())
+            .build()
+    );
+
+    let limiter = Arc::new(
+        ConcurrencyRateLimiter::builder()
+            .registry(registry)
             .build()
     );
 

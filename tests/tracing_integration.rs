@@ -1,29 +1,29 @@
 mod integration_tests {
     use reqgov::{
-        OriginRateLimiter, Policy, QuotaUnit, SmootherConfig,
-        PolicyTracing, SmootherTracing, StatusTracing, RateLimitTracing,
+        OriginLimiterMiddleware, OriginRateLimiter, Policy, PolicyTracer, QuotaUnit,
+        SmootherConfig, SmootherTracer, StatusTracer,
     };
     use std::sync::Arc;
 
     #[test]
     fn test_rate_limit_tracing_creation() {
         let limiter = Arc::new(OriginRateLimiter::new());
-        let _tracing = RateLimitTracing::new(limiter);
+        let _tracing = OriginLimiterMiddleware::new(limiter);
     }
 
     #[test]
     fn test_policy_tracing_creation() {
-        let _tracing = PolicyTracing;
+        let _tracing = PolicyTracer;
     }
 
     #[test]
     fn test_smoother_tracing_creation() {
-        let _tracing = SmootherTracing;
+        let _tracing = SmootherTracer;
     }
 
     #[test]
     fn test_status_tracing_creation() {
-        let _tracing = StatusTracing;
+        let _tracing = StatusTracer;
     }
 
     #[test]
@@ -31,10 +31,10 @@ mod integration_tests {
         let limiter = Arc::new(
             OriginRateLimiter::builder()
                 .smoother(SmootherConfig::default())
-                .build()
+                .build(),
         );
-        let _tracing = RateLimitTracing::new(limiter.clone());
-        
+        let _tracing = OriginLimiterMiddleware::new(limiter.clone());
+
         assert!(limiter.smoother().is_some());
     }
 
@@ -51,7 +51,7 @@ mod integration_tests {
 
         let slots: Vec<_> = limiter.slots().collect();
         assert_eq!(slots.len(), 1);
-        
+
         let (name, slot) = &slots[0];
         assert_eq!(*name, "burst");
         assert_eq!(slot.policy.quota, 100);

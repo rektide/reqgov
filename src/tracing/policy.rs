@@ -1,12 +1,12 @@
-use crate::limiter::origin::OriginRateLimiter;
+use crate::origin::origin::OriginRateLimiter;
 use http::Extensions;
 use reqwest_middleware::{Middleware, Next, Result};
 use std::sync::Arc;
 
-pub struct PolicyTracing;
+pub struct PolicyTracer;
 
 #[async_trait::async_trait]
-impl Middleware for PolicyTracing {
+impl Middleware for PolicyTracer {
     async fn handle(
         &self,
         req: reqwest_middleware::reqwest::Request,

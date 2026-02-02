@@ -1,12 +1,12 @@
-use crate::limiter::origin::OriginRateLimiter;
+use crate::origin::origin::OriginRateLimiter;
 use http::Extensions;
 use reqwest_middleware::{Middleware, Next, Result};
 use std::sync::Arc;
 
-pub struct SmootherTracing;
+pub struct SmootherTracer;
 
 #[async_trait::async_trait]
-impl Middleware for SmootherTracing {
+impl Middleware for SmootherTracer {
     async fn handle(
         &self,
         req: reqwest_middleware::reqwest::Request,

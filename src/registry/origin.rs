@@ -1,4 +1,4 @@
-use crate::limiter::origin::OriginRateLimiter;
+use crate::origin::origin::OriginRateLimiter;
 use crate::parsing::headers::{parse_limit_header, parse_policy_header};
 use crate::smoothing::smoother::SmootherConfig;
 use http::HeaderMap;
