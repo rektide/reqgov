@@ -73,7 +73,13 @@ impl SmootherLimiter {
         }
     }
 
-    pub fn update_policies(&self, _policies: Vec<Policy>) {
+    pub async fn update_policies(&self, policies: Vec<Policy>) {
+        if let Some(first_policy) = policies.first() {
+            let window = first_policy.window_secs.unwrap_or(60);
+            if let Some(smoother) = self.smoother.write().await.as_mut() {
+                smoother.configure(first_policy.quota, window);
+            }
+        }
     }
 }
 

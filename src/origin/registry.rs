@@ -124,7 +124,7 @@ impl OriginRegistry {
                 self.smoother_limiters.entry(key.clone())
                     .or_insert_with(|| Arc::new(SmootherLimiter::builder().config(config.clone()).build()))
                     .value()
-                    .update_policies(policies);
+                    .update_policies(policies).await;
             }
         }
 
