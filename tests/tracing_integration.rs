@@ -1,6 +1,7 @@
 mod integration_tests {
     use reqgov::{
-        OriginLimiter, Policy, PolicyTracer, SmootherConfig, SmootherTracer, StatusTracer,
+        OriginLimiter, OriginLimiterTracer, Policy, PolicyTracer, SmootherConfig, SmootherTracer,
+        StatusTracer,
     };
     use std::sync::Arc;
 
@@ -50,5 +51,18 @@ mod integration_tests {
         let limiter = OriginLimiter::builder().build();
 
         let _limiter = limiter;
+    }
+
+    #[test]
+    fn test_origin_limiter_tracer_creation() {
+        let limiter = Arc::new(OriginLimiter::new());
+        let _tracer = OriginLimiterTracer::new(limiter);
+    }
+
+    #[test]
+    fn test_origin_limiter_tracer_is_clone() {
+        let limiter = Arc::new(OriginLimiter::new());
+        let tracer = OriginLimiterTracer::new(limiter);
+        let _cloned = tracer.clone();
     }
 }
