@@ -25,11 +25,10 @@ impl OriginRegistryBuilder {
     }
 
     pub fn build(self) -> OriginRegistry {
-        let smoother_config = self.smoother_config.unwrap_or_default();
         OriginRegistry {
             origin_limiters: Arc::new(DashMap::new()),
             smoother_limiters: Arc::new(DashMap::new()),
-            smoother_config,
+            smoother_config: self.smoother_config,
         }
     }
 }
@@ -37,7 +36,7 @@ impl OriginRegistryBuilder {
 pub struct OriginRegistry {
     origin_limiters: Arc<DashMap<String, Arc<OriginLimiter>>>,
     smoother_limiters: Arc<DashMap<String, Arc<SmootherLimiter>>>,
-    smoother_config: SmootherConfig,
+    smoother_config: Option<SmootherConfig>,
 }
 
 impl OriginRegistry {
@@ -65,43 +64,53 @@ impl OriginRegistry {
 
     pub fn get_smoother_limiter(&self, url: &Url) -> Arc<SmootherLimiter> {
         let key = Self::origin_key(url);
+        let config = self.smoother_config.as_ref().unwrap();
 
         self.smoother_limiters
             .entry(key)
-            .or_insert_with(|| Arc::new(SmootherLimiter::builder().config(self.smoother_config.clone()).build()))
+            .or_insert_with(|| Arc::new(SmootherLimiter::builder().config(config.clone()).build()))
             .value()
             .clone()
     }
 
     pub async fn check(&self, url: &Url) -> std::result::Result<(), RateLimitViolation> {
         let origin_limiter = self.get_origin_limiter(url);
-        let smoother_limiter = self.get_smoother_limiter(url);
-
         origin_limiter.check().await?;
-        smoother_limiter.check().await?;
+
+        if self.smoother_config.is_some() {
+            let smoother_limiter = self.get_smoother_limiter(url);
+            smoother_limiter.check().await?;
+        }
         Ok(())
     }
 
     pub async fn wait(&self, url: &Url) {
         let origin_limiter = self.get_origin_limiter(url);
-        let smoother_limiter = self.get_smoother_limiter(url);
-
         origin_limiter.wait().await;
-        smoother_limiter.wait().await;
+
+        if self.smoother_config.is_some() {
+            let smoother_limiter = self.get_smoother_limiter(url);
+            smoother_limiter.wait().await;
+        }
     }
 
     pub async fn update_from_response(&self, url: &Url, headers: &HeaderMap) {
         let origin_limiter = self.get_origin_limiter(url);
-        let smoother_limiter = self.get_smoother_limiter(url);
 
         if let Some(policies) = parse_policy_header(headers) {
             origin_limiter.update_policies(policies.clone());
-            smoother_limiter.update_policies(policies);
+            if self.smoother_config.is_some() {
+                let smoother_limiter = self.get_smoother_limiter(url);
+                smoother_limiter.update_policies(policies);
+            }
         }
 
         if let Some(limits) = parse_limit_header(headers) {
             origin_limiter.update_limits(limits.clone()).await;
-            smoother_limiter.update_limits(limits).await;
+            if self.smoother_config.is_some() {
+                let smoother_limiter = self.get_smoother_limiter(url);
+                smoother_limiter.update_limits(limits).await;
+            }
         }
     }
 }
@@ -117,7 +126,9 @@ impl Middleware for OriginRegistry {
         let url = req.url().clone();
         self.check(&url).await.map_err(|e| reqwest_middleware::Error::middleware(e))?;
         extensions.insert(self.get_origin_limiter(&url));
-        extensions.insert(self.get_smoother_limiter(&url));
+        if self.smoother_config.is_some() {
+            extensions.insert(self.get_smoother_limiter(&url));
+        }
         next.run(req, extensions).await
     }
 }
@@ -170,12 +181,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_wait() {
-        let registry = OriginRegistry::builder()
-            .smoother(SmootherConfig::default())
-            .build();
+    async fn test_registry_without_smoother() {
+        let registry = OriginRegistry::builder().build();
         let url = Url::parse("https://api.example.com/test").unwrap();
 
+        let mut headers = HeaderMap::new();
+        headers.insert("ratelimit-policy", "burst:100:60:requests".parse().unwrap());
+        headers.insert("ratelimit", "burst:45:30".parse().unwrap());
+
+        registry.update_from_response(&url, &headers).await;
+        assert!(registry.check(&url).await.is_ok());
         registry.wait(&url).await;
+
+        let origin_limiter = registry.get_origin_limiter(&url);
+        assert_eq!(origin_limiter.slots.len(), 1);
     }
 }
