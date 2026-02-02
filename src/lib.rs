@@ -1,6 +1,7 @@
 mod origin;
 mod concurrency;
 mod tracing;
+mod url;
 
 pub use origin::{OriginLimiter, OriginLimiterBuilder, SmootherLimiter, OriginRegistry, OriginRegistryBuilder, RateLimitViolation};
 pub use origin::{Policy, QuotaUnit, ServiceLimit, PolicySlot};
@@ -10,3 +11,4 @@ pub use concurrency::{ConcurrencyRateLimiter, ConcurrencyRateLimiterBuilder, Con
 pub use tracing::{
     PolicyTracer, SmootherTracer, StatusTracer, ConcurrencyTracer,
 };
+pub use url::origin_key;

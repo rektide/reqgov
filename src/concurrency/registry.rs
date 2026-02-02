@@ -1,3 +1,4 @@
+use crate::url::origin_key;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -47,20 +48,12 @@ impl ConcurrencyRegistry {
         ConcurrencyRegistryBuilder::new()
     }
 
-    fn origin_key(url: &Url) -> String {
-        format!(
-            "{}://{}",
-            url.scheme(),
-            url.host_str().unwrap_or("unknown")
-        )
-    }
-
     pub fn get_global_semaphore(&self) -> Arc<Semaphore> {
         Arc::clone(&self.global_semaphore)
     }
 
     pub fn get_domain_semaphore(&self, url: &Url) -> Arc<Semaphore> {
-        let key = Self::origin_key(url);
+        let key = origin_key(url);
         let permits = self.max_concurrent_per_domain.unwrap_or(i32::MAX as usize);
 
         self.per_domain_semaphores
@@ -85,7 +78,7 @@ mod tests {
     #[test]
     fn test_origin_key() {
         let url = Url::parse("https://api.github.com/repos").unwrap();
-        let key = ConcurrencyRegistry::origin_key(&url);
+        let key = origin_key(&url);
         assert_eq!(key, "https://api.github.com");
     }
 

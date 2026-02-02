@@ -4,6 +4,7 @@ use crate::origin::parsing::{parse_limit_header, parse_policy_header};
 use crate::origin::smoother::SmootherConfig;
 use crate::origin::state::RateLimitViolation;
 use crate::origin::check_result::RateLimitCheckResult;
+use crate::url::origin_key;
 use http::{Extensions, HeaderMap};
 use reqwest_middleware::{Middleware, Next, Result};
 use dashmap::DashMap;
@@ -45,16 +46,8 @@ impl OriginRegistry {
         OriginRegistryBuilder::new()
     }
 
-    fn origin_key(url: &Url) -> String {
-        format!(
-            "{}://{}",
-            url.scheme(),
-            url.host_str().unwrap_or("unknown")
-        )
-    }
-
     pub fn get_origin_limiter(&self, url: &Url) -> Arc<OriginLimiter> {
-        let key = Self::origin_key(url);
+        let key = origin_key(url);
 
         self.origin_limiters
             .entry(key)
@@ -64,7 +57,7 @@ impl OriginRegistry {
     }
 
     pub fn get_smoother_limiter(&self, url: &Url) -> Arc<SmootherLimiter> {
-        let key = Self::origin_key(url);
+        let key = origin_key(url);
         let config = self.smoother_config.as_ref().unwrap();
 
         self.smoother_limiters
@@ -154,7 +147,7 @@ mod tests {
     #[test]
     fn test_origin_key() {
         let url = Url::parse("https://api.github.com/repos").unwrap();
-        let key = OriginRegistry::origin_key(&url);
+        let key = origin_key(&url);
         assert_eq!(key, "https://api.github.com");
     }
 
