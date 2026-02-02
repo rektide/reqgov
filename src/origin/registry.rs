@@ -48,12 +48,8 @@ impl OriginRegistry {
 
     pub fn get_origin_limiter(&self, url: &Url) -> Arc<OriginLimiter> {
         let key = origin_key(url);
-        self._get_origin_limiter(&key)
-    }
-
-    fn _get_origin_limiter(&self, key: &str) -> Arc<OriginLimiter> {
         self.origin_limiters
-            .entry(key.to_string())
+            .entry(key)
             .or_insert_with(|| Arc::new(OriginLimiter::new()))
             .value()
             .clone()
@@ -62,12 +58,8 @@ impl OriginRegistry {
     pub fn get_smoother_limiter(&self, url: &Url) -> Arc<SmootherLimiter> {
         let key = origin_key(url);
         let config = self.smoother_config.as_ref().unwrap();
-        self._get_smoother_limiter(&key, config)
-    }
-
-    fn _get_smoother_limiter(&self, key: &str, config: &SmootherConfig) -> Arc<SmootherLimiter> {
         self.smoother_limiters
-            .entry(key.to_string())
+            .entry(key)
             .or_insert_with(|| Arc::new(SmootherLimiter::builder().config(config.clone()).build()))
             .value()
             .clone()
@@ -75,12 +67,18 @@ impl OriginRegistry {
 
     pub async fn check(&self, url: &Url) -> std::result::Result<(), RateLimitViolation> {
         let key = origin_key(url);
-        let origin_limiter = self._get_origin_limiter(&key);
-        origin_limiter.check().await?;
+        self.origin_limiters.entry(key.clone())
+            .or_insert_with(|| Arc::new(OriginLimiter::new()))
+            .value()
+            .check()
+            .await?;
 
         if let Some(config) = &self.smoother_config {
-            let smoother_limiter = self._get_smoother_limiter(&key, config);
-            smoother_limiter.check().await?;
+            self.smoother_limiters.entry(key)
+                .or_insert_with(|| Arc::new(SmootherLimiter::builder().config(config.clone()).build()))
+                .value()
+                .check()
+                .await?;
         }
         Ok(())
     }
@@ -89,12 +87,18 @@ impl OriginRegistry {
         let start = std::time::Instant::now();
         let key = origin_key(url);
 
-        let origin_limiter = self._get_origin_limiter(&key);
-        origin_limiter.wait().await;
+        self.origin_limiters.entry(key.clone())
+            .or_insert_with(|| Arc::new(OriginLimiter::new()))
+            .value()
+            .wait()
+            .await;
 
         if let Some(config) = &self.smoother_config {
-            let smoother_limiter = self._get_smoother_limiter(&key, config);
-            smoother_limiter.wait().await;
+            self.smoother_limiters.entry(key)
+                .or_insert_with(|| Arc::new(SmootherLimiter::builder().config(config.clone()).build()))
+                .value()
+                .wait()
+            .await;
         }
 
         let wait_duration = start.elapsed();
@@ -108,21 +112,29 @@ impl OriginRegistry {
 
     pub async fn update_from_response(&self, url: &Url, headers: &HeaderMap) {
         let key = origin_key(url);
-        let origin_limiter = self._get_origin_limiter(&key);
+
+        let origin_limiter = self.origin_limiters.entry(key.clone())
+            .or_insert_with(|| Arc::new(OriginLimiter::new()))
+            .value()
+            .clone();
 
         if let Some(policies) = parse_policy_header(headers) {
             origin_limiter.update_policies(policies.clone()).await;
             if let Some(config) = &self.smoother_config {
-                let smoother_limiter = self._get_smoother_limiter(&key, config);
-                smoother_limiter.update_policies(policies);
+                self.smoother_limiters.entry(key.clone())
+                    .or_insert_with(|| Arc::new(SmootherLimiter::builder().config(config.clone()).build()))
+                    .value()
+                    .update_policies(policies);
             }
         }
 
         if let Some(limits) = parse_limit_header(headers) {
             origin_limiter.update_limits(limits.clone()).await;
             if let Some(config) = &self.smoother_config {
-                let smoother_limiter = self._get_smoother_limiter(&key, config);
-                smoother_limiter.update_limits(limits).await;
+                self.smoother_limiters.entry(key)
+                    .or_insert_with(|| Arc::new(SmootherLimiter::builder().config(config.clone()).build()))
+                    .value()
+                    .update_limits(limits).await;
             }
         }
     }
@@ -142,9 +154,15 @@ impl Middleware for OriginRegistry {
         let check_result = self.wait(&url).await;
         extensions.insert(check_result);
 
-        extensions.insert(self._get_origin_limiter(&key));
+        extensions.insert(self.origin_limiters.entry(key.clone())
+            .or_insert_with(|| Arc::new(OriginLimiter::new()))
+            .value()
+            .clone());
         if let Some(config) = &self.smoother_config {
-            extensions.insert(self._get_smoother_limiter(&key, config));
+            extensions.insert(self.smoother_limiters.entry(key)
+                .or_insert_with(|| Arc::new(SmootherLimiter::builder().config(config.clone()).build()))
+                .value()
+                .clone());
         }
         next.run(req, extensions).await
     }
