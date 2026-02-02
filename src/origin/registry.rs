@@ -1,6 +1,6 @@
 use crate::origin::origin::OriginRateLimiter;
-use crate::parsing::headers::{parse_limit_header, parse_policy_header};
-use crate::smoothing::smoother::SmootherConfig;
+use crate::origin::parsing::{parse_limit_header, parse_policy_header};
+use crate::origin::smoother::SmootherConfig;
 use http::{Extensions, HeaderMap};
 use reqwest_middleware::{Middleware, Next, Result};
 use std::collections::HashMap;
@@ -127,10 +127,10 @@ mod tests {
             .smoother(SmootherConfig::default())
             .build();
         let url = Url::parse("https://api.example.com/test").unwrap();
-        
+
         let mut headers = HeaderMap::new();
-        headers.insert("X-Policy", "burst:100:60:requests".parse().unwrap());
-        headers.insert("X-Limit", "burst:45:30".parse().unwrap());
+        headers.insert("ratelimit-policy", "burst:100:60:requests".parse().unwrap());
+        headers.insert("ratelimit", "burst:45:30".parse().unwrap());
 
         registry.update_from_response(&url, &headers).await;
         let limiter = registry.get_limiter(&url).await;

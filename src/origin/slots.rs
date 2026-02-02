@@ -1,4 +1,4 @@
-use super::policy::{Policy, ServiceLimit};
+use super::policies::{Policy, ServiceLimit};
 use governor::clock::{Clock, DefaultClock};
 use governor::middleware::{StateInformationMiddleware, StateSnapshot};
 use governor::state::InMemoryState;
@@ -94,6 +94,7 @@ impl PolicySlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::origin::policies::QuotaUnit;
 
     #[test]
     fn test_policy_slot_creation() {
@@ -101,7 +102,7 @@ mod tests {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         };
 
@@ -126,7 +127,7 @@ mod tests {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         };
 
@@ -150,7 +151,7 @@ mod tests {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         };
 
@@ -175,7 +176,7 @@ mod tests {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         };
 

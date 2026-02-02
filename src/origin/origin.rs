@@ -1,7 +1,7 @@
 use crate::origin::state::RateLimitViolation;
-use crate::policies::policy::Policy;
-use crate::policies::slot::PolicySlot;
-use crate::smoothing::smoother::{Smoother, SmootherConfig};
+use crate::origin::policies::{Policy, QuotaUnit, ServiceLimit};
+use crate::origin::slots::PolicySlot;
+use crate::origin::smoother::{Smoother, SmootherConfig};
 use governor::clock::Clock;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -65,7 +65,7 @@ impl OriginRateLimiter {
         self.recalculate_fastest();
     }
 
-    pub async fn update_limits(&self, limits: Vec<crate::policies::policy::ServiceLimit>) {
+    pub async fn update_limits(&self, limits: Vec<ServiceLimit>) {
         for limit in limits {
             if let Some(mut slot) = self.slots.get_mut(&limit.name) {
                 slot.update(&limit);
@@ -136,30 +136,30 @@ impl OriginRateLimiter {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_limiter_new() {
+    #[tokio::test]
+    async fn test_limiter_new() {
         let limiter = OriginRateLimiter::new();
         assert_eq!(limiter.slots.len(), 0);
-        assert!(limiter.smoother.read().blocking_read().is_none());
+        assert!(limiter.smoother.read().await.is_none());
     }
 
-    #[test]
-    fn test_limiter_with_smoother() {
+    #[tokio::test]
+    async fn test_limiter_with_smoother() {
         let limiter = OriginRateLimiter::builder()
-            .smoother(crate::smoothing::smoother::SmootherConfig::default())
+            .smoother(SmootherConfig::default())
             .build();
         assert_eq!(limiter.slots.len(), 0);
-        assert!(limiter.smoother.read().blocking_read().is_some());
+        assert!(limiter.smoother.read().await.is_some());
     }
 
     #[test]
     fn test_update_policies() {
         let limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![crate::policies::policy::Policy {
+        limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -170,15 +170,15 @@ mod tests {
     #[tokio::test]
     async fn test_update_limits() {
         let limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![crate::policies::policy::Policy {
+        limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         }]);
 
-        limiter.update_limits(vec![crate::policies::policy::ServiceLimit {
+        limiter.update_limits(vec![ServiceLimit {
             name: "burst".to_string(),
             remaining: 45,
             reset_secs: Some(30),
@@ -192,11 +192,11 @@ mod tests {
     #[tokio::test]
     async fn test_check_passes() {
         let limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![crate::policies::policy::Policy {
+        limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -206,13 +206,13 @@ mod tests {
     #[tokio::test]
     async fn test_check_with_smoother() {
         let limiter = OriginRateLimiter::builder()
-            .smoother(crate::smoothing::smoother::SmootherConfig::default())
+            .smoother(SmootherConfig::default())
             .build();
-        limiter.update_policies(vec![crate::policies::policy::Policy {
+        limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -222,11 +222,11 @@ mod tests {
     #[tokio::test]
     async fn test_policy_exceeded() {
         let limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![crate::policies::policy::Policy {
+        limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 1,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -245,11 +245,11 @@ mod tests {
     #[test]
     fn test_slots_accessor() {
         let limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![crate::policies::policy::Policy {
+        limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         }]);
 
@@ -259,11 +259,11 @@ mod tests {
     #[tokio::test]
     async fn test_wait() {
         let limiter = OriginRateLimiter::new();
-        limiter.update_policies(vec![crate::policies::policy::Policy {
+        limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
             quota: 100,
             window_secs: Some(60),
-            quota_unit: crate::policies::policy::QuotaUnit::Requests,
+            quota_unit: QuotaUnit::Requests,
             partition_key: None,
         }]);
 

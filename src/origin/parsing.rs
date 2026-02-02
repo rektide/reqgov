@@ -1,4 +1,4 @@
-use crate::policies::policy::{Policy, QuotaUnit, ServiceLimit};
+use super::policies::{Policy, QuotaUnit, ServiceLimit};
 use http::HeaderMap;
 
 /// Parse `RateLimit-Policy: "name";q=100;w=60`

@@ -1,10 +1,16 @@
-use reqgov::{ConcurrencyRateLimiter, OriginRateLimiter, OriginRegistry, SmootherConfig};
+use reqgov::{ConcurrencyRegistry, ConcurrencyRateLimiter, OriginRateLimiter, OriginRegistry, SmootherConfig};
 use reqwest_ratelimit::RateLimiter;
 use std::sync::Arc;
 
 #[tokio::test]
 async fn test_http_api_limiter_full_flow() {
-    let registry = Arc::new(
+    let concurrency_registry = Arc::new(
+        ConcurrencyRegistry::builder()
+            .max_concurrent_global(10)
+            .build()
+    );
+
+    let origin_registry = Arc::new(
         OriginRegistry::builder()
             .smoother(SmootherConfig::default())
             .build()
@@ -12,7 +18,7 @@ async fn test_http_api_limiter_full_flow() {
 
     let concurrency_limiter = Arc::new(
         ConcurrencyRateLimiter::builder()
-            .registry(registry)
+            .registry(concurrency_registry)
             .build()
     );
 
@@ -38,9 +44,9 @@ async fn test_registry_multiple_origins() {
     let limiter2 = registry.get_limiter(&url2).await;
     let limiter3 = registry.get_limiter(&url3).await;
 
-    limiter1.read().await.wait().await;
-    limiter2.read().await.wait().await;
-    limiter3.read().await.wait().await;
+    limiter1.wait().await;
+    limiter2.wait().await;
+    limiter3.wait().await;
 }
 
 #[tokio::test]
@@ -87,7 +93,7 @@ async fn test_registry_update_from_response() {
     registry.update_from_response(&url, &headers).await;
 
     let limiter = registry.get_limiter(&url).await;
-    limiter.read().await.check().unwrap();
+    limiter.check().await.unwrap();
 }
 
 #[tokio::test]
@@ -106,7 +112,7 @@ async fn test_registry_concurrent_access() {
         let url = url.clone();
         handles.push(tokio::spawn(async move {
             let limiter = registry.get_limiter(&url).await;
-            limiter.read().await.wait().await;
+            limiter.wait().await;
         }));
     }
 
@@ -117,7 +123,14 @@ async fn test_registry_concurrent_access() {
 
 #[tokio::test]
 async fn test_http_api_limiter_concurrent_requests() {
-    let registry = Arc::new(
+    let concurrency_registry = Arc::new(
+        ConcurrencyRegistry::builder()
+            .max_concurrent_global(5)
+            .max_concurrent_per_domain(3)
+            .build()
+    );
+
+    let origin_registry = Arc::new(
         OriginRegistry::builder()
             .smoother(SmootherConfig::default())
             .build()
@@ -125,7 +138,7 @@ async fn test_http_api_limiter_concurrent_requests() {
 
     let limiter = Arc::new(
         ConcurrencyRateLimiter::builder()
-            .registry(registry)
+            .registry(concurrency_registry)
             .build()
     );
 
