@@ -85,38 +85,23 @@ impl OriginRegistry {
         Ok(())
     }
 
-    pub async fn check_with_result(&self, url: &Url) -> RateLimitCheckResult {
-        let origin_limiter = self.get_origin_limiter(url);
+    pub async fn wait(&self, url: &Url) -> RateLimitCheckResult {
+        let start = std::time::Instant::now();
 
-        match origin_limiter.check().await {
-            Ok(()) => {}
-            Err(RateLimitViolation::PolicyExceeded { policy_name, wait_duration }) => {
-                return RateLimitCheckResult::blocked_by_policy(policy_name, wait_duration);
-            }
-            Err(RateLimitViolation::Smoothed { .. }) => {}
-        }
-
-        if self.smoother_config.is_some() {
-            let smoother_limiter = self.get_smoother_limiter(url);
-            match smoother_limiter.check().await {
-                Ok(()) => {}
-                Err(RateLimitViolation::Smoothed { wait_duration }) => {
-                    return RateLimitCheckResult::blocked_by_smoother(wait_duration);
-                }
-                Err(RateLimitViolation::PolicyExceeded { .. }) => {}
-            }
-        }
-
-        RateLimitCheckResult::allowed()
-    }
-
-    pub async fn wait(&self, url: &Url) {
         let origin_limiter = self.get_origin_limiter(url);
         origin_limiter.wait().await;
 
         if self.smoother_config.is_some() {
             let smoother_limiter = self.get_smoother_limiter(url);
             smoother_limiter.wait().await;
+        }
+
+        let wait_duration = start.elapsed();
+
+        if wait_duration.as_millis() > 0 {
+            RateLimitCheckResult::blocked(wait_duration)
+        } else {
+            RateLimitCheckResult::allowed()
         }
     }
 
@@ -150,23 +135,9 @@ impl Middleware for OriginRegistry {
         next: Next<'_>,
     ) -> Result<reqwest_middleware::reqwest::Response> {
         let url = req.url().clone();
-        let check_result = self.check_with_result(&url).await;
 
+        let check_result = self.wait(&url).await;
         extensions.insert(check_result);
-
-        if !check_result.allowed {
-            match check_result.blocked_by {
-                Some(RateLimitBlockedBy::Smoother) => {
-                    let wait_duration = check_result.wait_duration.unwrap();
-                    return Err(reqwest_middleware::Error::middleware(RateLimitViolation::Smoothed { wait_duration }));
-                }
-                Some(RateLimitBlockedBy::Policy(name)) => {
-                    let wait_duration = check_result.wait_duration.unwrap();
-                    return Err(reqwest_middleware::Error::middleware(RateLimitViolation::PolicyExceeded { policy_name: name, wait_duration }));
-                }
-                None => {}
-            }
-        }
 
         extensions.insert(self.get_origin_limiter(&url));
         if self.smoother_config.is_some() {
