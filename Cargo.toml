@@ -18,6 +18,7 @@ bon = "2.1"
 dashmap = "6.1.0"
 governor = "0.10"
 http = "1.1"
+parking_lot = "0.12.5"
 reqwest-middleware = "0.5"
 reqwest-ratelimit = "0.5"
 tokio = { version = "1", features = ["sync"] }

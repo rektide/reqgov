@@ -109,7 +109,7 @@ impl OriginRegistry {
         let origin_limiter = self.get_origin_limiter(url);
 
         if let Some(policies) = parse_policy_header(headers) {
-            origin_limiter.update_policies(policies.clone());
+            origin_limiter.update_policies(policies.clone()).await;
             if self.smoother_config.is_some() {
                 let smoother_limiter = self.get_smoother_limiter(url);
                 smoother_limiter.update_policies(policies);
@@ -181,7 +181,7 @@ mod tests {
 
         registry.update_from_response(&url, &headers).await;
         let origin_limiter = registry.get_origin_limiter(&url);
-        assert_eq!(origin_limiter.slots.len(), 1);
+        assert_eq!(origin_limiter.slots.lock().await.len(), 1);
     }
 
     #[tokio::test]
@@ -208,6 +208,6 @@ mod tests {
         registry.wait(&url).await;
 
         let origin_limiter = registry.get_origin_limiter(&url);
-        assert_eq!(origin_limiter.slots.len(), 1);
+        assert_eq!(origin_limiter.slots.lock().await.len(), 1);
     }
 }

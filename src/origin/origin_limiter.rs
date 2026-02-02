@@ -2,8 +2,8 @@ use crate::origin::state::RateLimitViolation;
 use crate::origin::policies::{Policy, ServiceLimit};
 use crate::origin::slots::PolicySlot;
 use governor::clock::Clock;
-use dashmap::DashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Default)]
 pub struct OriginLimiterBuilder;
@@ -15,13 +15,13 @@ impl OriginLimiterBuilder {
 
     pub fn build(self) -> OriginLimiter {
         OriginLimiter {
-            slots: Arc::new(DashMap::new()),
+            slots: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
 
 pub struct OriginLimiter {
-    pub(crate) slots: Arc<DashMap<String, PolicySlot>>,
+    pub(crate) slots: Arc<Mutex<Vec<PolicySlot>>>,
 }
 
 impl Clone for OriginLimiter {
@@ -41,74 +41,68 @@ impl OriginLimiter {
         Self::builder().build()
     }
 
-    pub fn update_policies(&self, policies: Vec<Policy>) {
+    pub async fn update_policies(&self, policies: Vec<Policy>) {
+        let mut slots = self.slots.lock().await;
+
         for policy in policies {
-            self.slots.entry(policy.name.clone())
-                .and_modify(|slot| slot.policy = policy.clone())
-                .or_insert_with(|| PolicySlot::new(policy));
+            let existing = slots.iter_mut()
+                .find(|slot| slot.policy.name == policy.name);
+
+            if let Some(slot) = existing {
+                slot.policy = policy;
+            } else {
+                slots.push(PolicySlot::new(policy));
+            }
         }
+
+        slots.sort_by(|a, b| {
+            a.policy.window_secs.unwrap_or(60)
+                .cmp(&b.policy.window_secs.unwrap_or(60))
+        });
     }
 
     pub async fn update_limits(&self, limits: Vec<ServiceLimit>) {
+        let mut slots = self.slots.lock().await;
+
         for limit in limits {
-            if let Some(mut slot) = self.slots.get_mut(&limit.name) {
+            if let Some(slot) = slots.iter_mut().find(|s| s.policy.name == limit.name) {
                 slot.update(&limit);
             }
         }
     }
 
     /// Access slots for tracing middleware
-    pub fn slots(&self) -> Vec<(String, PolicySlot)> {
-        vec![]
+    pub async fn slots(&self) -> Vec<(String, u32, u32, u32)> {
+        let slots = self.slots.lock().await;
+        slots.iter()
+            .map(|slot| (
+                slot.policy.name.clone(),
+                slot.governor_remaining(),
+                slot.policy.quota,
+                slot.policy.window_secs.unwrap_or(60)
+            ))
+            .collect()
     }
 
     pub async fn check(&self) -> Result<(), RateLimitViolation> {
-        let mut policy_names: Vec<String> = self.slots.iter()
-            .map(|entry| entry.key().clone())
-            .collect();
+        let slots = self.slots.lock().await;
 
-        policy_names.sort_by(|a, b| {
-            let window_a = self.slots.get(a)
-                .and_then(|slot| slot.policy.window_secs)
-                .unwrap_or(60);
-            let window_b = self.slots.get(b)
-                .and_then(|slot| slot.policy.window_secs)
-                .unwrap_or(60);
-            window_a.cmp(&window_b)
-        });
-
-        for name in policy_names {
-            if let Some(slot) = self.slots.get(&name) {
-                if let Err(not_until) = slot.check() {
-                    return Err(RateLimitViolation::PolicyExceeded {
-                        policy_name: name,
-                        wait_duration: not_until.wait_time_from(slot.clock().now()),
-                    });
-                }
+        for slot in slots.iter() {
+            if let Err(not_until) = slot.check() {
+                return Err(RateLimitViolation::PolicyExceeded {
+                    policy_name: slot.policy.name.clone(),
+                    wait_duration: not_until.wait_time_from(slot.clock().now()),
+                });
             }
         }
         Ok(())
     }
 
     pub async fn wait(&self) {
-        let mut policy_names: Vec<String> = self.slots.iter()
-            .map(|entry| entry.key().clone())
-            .collect();
+        let slots = self.slots.lock().await;
 
-        policy_names.sort_by(|a, b| {
-            let window_a = self.slots.get(a)
-                .and_then(|slot| slot.policy.window_secs)
-                .unwrap_or(60);
-            let window_b = self.slots.get(b)
-                .and_then(|slot| slot.policy.window_secs)
-                .unwrap_or(60);
-            window_a.cmp(&window_b)
-        });
-
-        for name in policy_names {
-            if let Some(slot) = self.slots.get(&name) {
-                slot.wait().await;
-            }
+        for slot in slots.iter() {
+            slot.wait().await;
         }
     }
 }
@@ -121,11 +115,11 @@ mod tests {
     #[tokio::test]
     async fn test_limiter_new() {
         let limiter = OriginLimiter::new();
-        assert_eq!(limiter.slots.len(), 0);
+        assert_eq!(limiter.slots.lock().await.len(), 0);
     }
 
-    #[test]
-    fn test_update_policies() {
+    #[tokio::test]
+    async fn test_update_policies() {
         let limiter = OriginLimiter::new();
         limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
@@ -133,10 +127,10 @@ mod tests {
             window_secs: Some(60),
             quota_unit: QuotaUnit::Requests,
             partition_key: None,
-        }]);
+        }]).await;
 
-        assert_eq!(limiter.slots.len(), 1);
-        assert!(limiter.slots.contains_key("burst"));
+        assert_eq!(limiter.slots.lock().await.len(), 1);
+        assert_eq!(limiter.slots.lock().await[0].policy.name, "burst");
     }
 
     #[tokio::test]
@@ -148,7 +142,7 @@ mod tests {
             window_secs: Some(60),
             quota_unit: QuotaUnit::Requests,
             partition_key: None,
-        }]);
+        }]).await;
 
         limiter.update_limits(vec![ServiceLimit {
             name: "burst".to_string(),
@@ -157,7 +151,7 @@ mod tests {
             partition_key: None,
         }]).await;
 
-        let slot = limiter.slots.get("burst").unwrap();
+        let slot = &limiter.slots.lock().await[0];
         assert_eq!(slot.remaining, 45);
     }
 
@@ -170,7 +164,7 @@ mod tests {
             window_secs: Some(60),
             quota_unit: QuotaUnit::Requests,
             partition_key: None,
-        }]);
+        }]).await;
 
         assert!(limiter.check().await.is_ok());
     }
@@ -184,7 +178,7 @@ mod tests {
             window_secs: Some(60),
             quota_unit: QuotaUnit::Requests,
             partition_key: None,
-        }]);
+        }]).await;
 
         limiter.check().await.unwrap();
         let result = limiter.check().await;
@@ -198,8 +192,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_slots_accessor() {
+    #[tokio::test]
+    async fn test_slots_accessor() {
         let limiter = OriginLimiter::new();
         limiter.update_policies(vec![Policy {
             name: "burst".to_string(),
@@ -207,9 +201,9 @@ mod tests {
             window_secs: Some(60),
             quota_unit: QuotaUnit::Requests,
             partition_key: None,
-        }]);
+        }]).await;
 
-        assert_eq!(limiter.slots.len(), 1);
+        assert_eq!(limiter.slots.lock().await.len(), 1);
     }
 
     #[tokio::test]
@@ -221,7 +215,7 @@ mod tests {
             window_secs: Some(60),
             quota_unit: QuotaUnit::Requests,
             partition_key: None,
-        }]);
+        }]).await;
 
         limiter.check().await.unwrap();
         limiter.wait().await;

@@ -15,18 +15,19 @@ impl Middleware for PolicyTracer {
     ) -> Result<reqwest_middleware::reqwest::Response> {
         if let Some(limiter) = extensions.get::<Arc<OriginLimiter>>() {
             let span = tracing::Span::current();
-            for (name, slot) in limiter.slots() {
+            let slots = limiter.slots().await;
+            for (name, remaining, quota, window_secs) in slots {
                 span.record(
                     format!("rate_limit.policy.{}.remaining", name).as_str(),
-                    slot.governor_remaining(),
+                    remaining,
                 );
                 span.record(
                     format!("rate_limit.policy.{}.quota", name).as_str(),
-                    slot.policy.quota,
+                    quota,
                 );
                 span.record(
                     format!("rate_limit.policy.{}.window_secs", name).as_str(),
-                    slot.policy.window_secs.unwrap_or(60),
+                    window_secs,
                 );
             }
         }

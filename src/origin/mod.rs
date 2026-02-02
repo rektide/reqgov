@@ -16,4 +16,3 @@ pub use policies::{Policy, QuotaUnit, ServiceLimit};
 pub use slots::PolicySlot;
 pub use smoother::{Smoother, SmootherConfig};
 pub use parsing::{parse_policy_header, parse_limit_header};
-pub use check_result::RateLimitCheckResult;

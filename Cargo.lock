@@ -789,6 +789,7 @@ dependencies = [
  "dashmap",
  "governor",
  "http",
+ "parking_lot",
  "reqwest-middleware",
  "reqwest-ratelimit",
  "tokio",
