@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::Semaphore;
 use url::Url;
 
 #[derive(Default)]
@@ -28,7 +28,7 @@ impl ConcurrencyRegistryBuilder {
         let global_permits = self.max_concurrent_global.unwrap_or(i32::MAX as usize);
         ConcurrencyRegistry {
             global_semaphore: Arc::new(Semaphore::new(global_permits)),
-            per_domain_semaphores: Arc::new(RwLock::new(HashMap::new())),
+            per_domain_semaphores: DashMap::new(),
             max_concurrent_global: self.max_concurrent_global,
             max_concurrent_per_domain: self.max_concurrent_per_domain,
         }
@@ -37,7 +37,7 @@ impl ConcurrencyRegistryBuilder {
 
 pub struct ConcurrencyRegistry {
     global_semaphore: Arc<Semaphore>,
-    per_domain_semaphores: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
+    per_domain_semaphores: DashMap<String, Arc<Semaphore>>,
     max_concurrent_global: Option<usize>,
     max_concurrent_per_domain: Option<usize>,
 }
@@ -55,23 +55,15 @@ impl ConcurrencyRegistry {
         )
     }
 
-    pub async fn get_global_semaphore(&self) -> Arc<Semaphore> {
+    pub fn get_global_semaphore(&self) -> Arc<Semaphore> {
         Arc::clone(&self.global_semaphore)
     }
 
-    pub async fn get_domain_semaphore(&self, url: &Url) -> Arc<Semaphore> {
+    pub fn get_domain_semaphore(&self, url: &Url) -> Arc<Semaphore> {
         let key = Self::origin_key(url);
-
-        {
-            let semaphores = self.per_domain_semaphores.read().await;
-            if let Some(semaphore) = semaphores.get(&key) {
-                return Arc::clone(semaphore);
-            }
-        }
-
-        let mut semaphores = self.per_domain_semaphores.write().await;
         let permits = self.max_concurrent_per_domain.unwrap_or(i32::MAX as usize);
-        semaphores
+
+        self.per_domain_semaphores
             .entry(key)
             .or_insert_with(|| Arc::new(Semaphore::new(permits)))
             .clone()
@@ -112,7 +104,7 @@ mod tests {
         let registry = ConcurrencyRegistry::builder()
             .max_concurrent_global(5)
             .build();
-        let semaphore = registry.get_global_semaphore().await;
+        let semaphore = registry.get_global_semaphore();
 
         let _permit1 = semaphore.acquire().await.unwrap();
         let _permit2 = semaphore.acquire().await.unwrap();
@@ -128,7 +120,7 @@ mod tests {
             .max_concurrent_per_domain(3)
             .build();
         let url = Url::parse("https://api.example.com/test").unwrap();
-        let semaphore = registry.get_domain_semaphore(&url).await;
+        let semaphore = registry.get_domain_semaphore(&url);
 
         let _permit1 = semaphore.acquire().await.unwrap();
         let _permit2 = semaphore.acquire().await.unwrap();

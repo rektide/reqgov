@@ -76,12 +76,12 @@ impl ConcurrencyRateLimiter {
         *self.inner.current_url.write().await = Some(url);
     }
 
-    pub async fn get_global_semaphore(&self) -> Arc<tokio::sync::Semaphore> {
-        self.inner.registry.get_global_semaphore().await
+    pub fn get_global_semaphore(&self) -> Arc<tokio::sync::Semaphore> {
+        self.inner.registry.get_global_semaphore()
     }
 
-    pub async fn get_domain_semaphore(&self, url: &url::Url) -> Arc<tokio::sync::Semaphore> {
-        self.inner.registry.get_domain_semaphore(url).await
+    pub fn get_domain_semaphore(&self, url: &url::Url) -> Arc<tokio::sync::Semaphore> {
+        self.inner.registry.get_domain_semaphore(url)
     }
 
     pub fn max_concurrent_global(&self) -> Option<usize> {
@@ -97,8 +97,8 @@ impl reqwest_ratelimit::RateLimiter for ConcurrencyRateLimiter {
     fn acquire_permit(&self) -> impl std::future::Future<Output = ()> + Send + '_ {
         async move {
             if let Some(ref url) = *self.inner.current_url.read().await {
-                let global_semaphore = self.inner.registry.get_global_semaphore().await;
-                let domain_semaphore = self.inner.registry.get_domain_semaphore(url).await;
+                let global_semaphore = self.inner.registry.get_global_semaphore();
+                let domain_semaphore = self.inner.registry.get_domain_semaphore(url);
 
                 let _global_permit = global_semaphore.acquire().await.unwrap();
                 let _domain_permit = domain_semaphore.acquire().await.unwrap();
@@ -161,8 +161,8 @@ mod tests {
         let url = url::Url::parse("https://api.example.com/test").unwrap();
         limiter.set_url(url.clone()).await;
 
-        let _global = limiter.get_global_semaphore().await;
-        let _domain = limiter.get_domain_semaphore(&url).await;
+        let _global = limiter.get_global_semaphore();
+        let _domain = limiter.get_domain_semaphore(&url);
     }
 
     #[test]

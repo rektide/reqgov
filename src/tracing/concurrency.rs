@@ -19,8 +19,8 @@ impl Middleware for ConcurrencyTracer {
             let registry = rate_limiter.registry();
 
             let concurrency_wait_start = Instant::now();
-            let global_semaphore = registry.get_global_semaphore().await;
-            let domain_semaphore = registry.get_domain_semaphore(&url).await;
+            let global_semaphore = registry.get_global_semaphore();
+            let domain_semaphore = registry.get_domain_semaphore(&url);
 
             let _global_permit = global_semaphore.acquire().await.unwrap();
             let concurrency_wait = concurrency_wait_start.elapsed();
