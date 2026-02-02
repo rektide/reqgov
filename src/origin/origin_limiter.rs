@@ -72,17 +72,15 @@ impl OriginLimiter {
         }
     }
 
-    /// Access slots for tracing middleware
-    pub async fn slots(&self) -> Vec<(String, u32, u32, u32)> {
+    pub async fn for_each_slot<F, Fut>(&self, f: F)
+    where
+        F: Fn(&PolicySlot) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let slots = self.slots.lock().await;
-        slots.iter()
-            .map(|slot| (
-                slot.policy.name.clone(),
-                slot.governor_remaining(),
-                slot.policy.quota,
-                slot.policy.window_secs.unwrap_or(60)
-            ))
-            .collect()
+        for slot in slots.iter() {
+            f(slot).await;
+        }
     }
 
     pub async fn check(&self) -> Result<(), RateLimitViolation> {
