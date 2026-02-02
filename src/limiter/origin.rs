@@ -1,9 +1,33 @@
 use crate::limiter::state::RateLimitViolation;
 use crate::policies::policy::Policy;
 use crate::policies::slot::PolicySlot;
-use crate::smoothing::smoother::Smoother;
+use crate::smoothing::smoother::{Smoother, SmootherConfig};
 use governor::clock::Clock;
 use std::collections::HashMap;
+
+#[derive(Default)]
+pub struct OriginRateLimiterBuilder {
+    smoother_config: Option<SmootherConfig>,
+}
+
+impl OriginRateLimiterBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn smoother(mut self, config: SmootherConfig) -> Self {
+        self.smoother_config = Some(config);
+        self
+    }
+
+    pub fn build(self) -> OriginRateLimiter {
+        OriginRateLimiter {
+            smoother: self.smoother_config.map(Smoother::new),
+            slots: HashMap::new(),
+            fastest_policy: None,
+        }
+    }
+}
 
 pub struct OriginRateLimiter {
     pub(crate) slots: HashMap<String, PolicySlot>,
@@ -12,20 +36,12 @@ pub struct OriginRateLimiter {
 }
 
 impl OriginRateLimiter {
-    pub fn new() -> Self {
-        Self {
-            slots: HashMap::new(),
-            smoother: None,
-            fastest_policy: None,
-        }
+    pub fn builder() -> OriginRateLimiterBuilder {
+        OriginRateLimiterBuilder::new()
     }
 
-    pub fn with_smoother(smoother_config: crate::smoothing::smoother::SmootherConfig) -> Self {
-        Self {
-            slots: HashMap::new(),
-            smoother: Some(Smoother::new(smoother_config)),
-            fastest_policy: None,
-        }
+    pub fn new() -> Self {
+        Self::builder().build()
     }
 
     pub fn update_policies(&mut self, policies: Vec<Policy>) {
@@ -124,7 +140,9 @@ mod tests {
 
     #[test]
     fn test_limiter_with_smoother() {
-        let limiter = OriginRateLimiter::with_smoother(crate::smoothing::smoother::SmootherConfig::default());
+        let limiter = OriginRateLimiter::builder()
+            .smoother(crate::smoothing::smoother::SmootherConfig::default())
+            .build();
         assert_eq!(limiter.slots.len(), 0);
         assert!(limiter.smoother.is_some());
     }
@@ -181,7 +199,9 @@ mod tests {
 
     #[test]
     fn test_check_with_smoother() {
-        let mut limiter = OriginRateLimiter::with_smoother(crate::smoothing::smoother::SmootherConfig::default());
+        let mut limiter = OriginRateLimiter::builder()
+            .smoother(crate::smoothing::smoother::SmootherConfig::default())
+            .build();
         limiter.update_policies(vec![crate::policies::policy::Policy {
             name: "burst".to_string(),
             quota: 100,
@@ -236,7 +256,9 @@ mod tests {
         let limiter = OriginRateLimiter::new();
         assert!(limiter.smoother().is_none());
 
-        let limiter_with = OriginRateLimiter::with_smoother(crate::smoothing::smoother::SmootherConfig::default());
+        let limiter_with = OriginRateLimiter::builder()
+            .smoother(crate::smoothing::smoother::SmootherConfig::default())
+            .build();
         assert!(limiter_with.smoother().is_some());
     }
 

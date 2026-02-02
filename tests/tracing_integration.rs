@@ -28,7 +28,11 @@ mod integration_tests {
 
     #[test]
     fn test_limiter_with_smoother_for_tracing() {
-        let limiter = Arc::new(OriginRateLimiter::with_smoother(SmootherConfig::default()));
+        let limiter = Arc::new(
+            OriginRateLimiter::builder()
+                .smoother(SmootherConfig::default())
+                .build()
+        );
         let _tracing = RateLimitTracing::new(limiter.clone());
         
         assert!(limiter.smoother().is_some());
@@ -55,10 +59,12 @@ mod integration_tests {
 
     #[test]
     fn test_smoother_fields_accessible_for_tracing() {
-        let limiter = OriginRateLimiter::with_smoother(SmootherConfig {
-            micro_interval_secs: 5,
-            velocity: 2.0,
-        });
+        let limiter = OriginRateLimiter::builder()
+            .smoother(SmootherConfig {
+                micro_interval_secs: 5,
+                velocity: 2.0,
+            })
+            .build();
 
         let smoother = limiter.smoother().unwrap();
         assert_eq!(smoother.micro_interval_secs, 5);

@@ -18,8 +18,9 @@ use reqgov::{HttpApiRateLimiter, SmootherConfig};
 
 #[tokio::main]
 async fn main() {
-    let config = SmootherConfig::default();
-    let rate_limiter = HttpApiRateLimiter::new(config);
+    let rate_limiter = HttpApiRateLimiter::builder()
+        .smoother(SmootherConfig::default())
+        .build();
     
     let client = ClientBuilder::new(reqwest::Client::new())
         .with(reqwest_ratelimit::all(rate_limiter))

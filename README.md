@@ -40,7 +40,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         velocity: 1.5,
     };
 
-    let rate_limiter = HttpApiRateLimiter::new(smoother_config);
+    let rate_limiter = HttpApiRateLimiter::builder()
+        .smoother(smoother_config)
+        .build();
 
     let client = ClientBuilder::new(reqwest::Client::new())
         .with(reqwest_ratelimit::all(rate_limiter))
@@ -78,7 +80,9 @@ use reqgov::{HttpApiRateLimiter, SmootherConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rate_limiter = HttpApiRateLimiter::new(SmootherConfig::default());
+    let rate_limiter = HttpApiRateLimiter::builder()
+        .smoother(SmootherConfig::default())
+        .build();
 
     // GitHub API
     rate_limiter.set_url(url::Url::parse("https://api.github.com/repos").unwrap()).await;
@@ -148,11 +152,13 @@ For concurrency limiting telemetry:
 ```rust
 use reqgov::{HttpApiRateLimiter, ConcurrencyTracing, ConcurrencyTracingMiddleware};
 
-let limiter = Arc::new(HttpApiRateLimiter::with_concurrency_limits(
-    SmootherConfig::default(),
-    Some(100),  // max 100 global concurrent requests
-    Some(10),   // max 10 per domain
-));
+let limiter = Arc::new(
+    HttpApiRateLimiter::builder()
+        .smoother(SmootherConfig::default())
+        .max_concurrent_global(100)   // max 100 global concurrent requests
+        .max_concurrent_per_domain(10) // max 10 per domain
+        .build()
+);
 
 let client = ClientBuilder::new(reqwest::Client::new())
     .with(ConcurrencyTracing::new(limiter.clone()))
@@ -177,10 +183,19 @@ Main rate limiter that implements `reqwest_ratelimit::RateLimiter`.
 
 | Method | Description |
 |--------|-------------|
-| `new(config: SmootherConfig)` | Create a new rate limiter |
-| `with_registry(registry: Arc<OriginRegistry>)` | Use a shared registry |
+| `builder()` | Create a new builder |
 | `set_url(url: Url)` | Set the current request URL |
 | `acquire_permit()` | Wait until rate limit allows (trait method) |
+
+#### `HttpApiRateLimiterBuilder`
+
+| Method | Description |
+|--------|-------------|
+| `smoother(config: SmootherConfig)` | Configure smoother settings |
+| `registry(registry: Arc<OriginRegistry>)` | Use a shared registry |
+| `max_concurrent_global(max: usize)` | Set max global concurrent requests |
+| `max_concurrent_per_domain(max: usize)` | Set max per-domain concurrent requests |
+| `build()` | Build the rate limiter |
 
 ### `OriginRegistry`
 
@@ -188,9 +203,18 @@ Thread-safe registry mapping domains to rate limiters.
 
 | Method | Description |
 |--------|-------------|
-| `new(config: SmootherConfig)` | Create a new registry |
+| `builder()` | Create a new builder |
 | `get_limiter(url: &Url)` | Get or create limiter for origin |
 | `update_from_response(url: &Url, headers: &HeaderMap)` | Update limits from HTTP response |
+
+#### `OriginRegistryBuilder`
+
+| Method | Description |
+|--------|-------------|
+| `smoother(config: SmootherConfig)` | Configure smoother settings |
+| `max_concurrent_global(max: usize)` | Set max global concurrent requests |
+| `max_concurrent_per_domain(max: usize)` | Set max per-domain concurrent requests |
+| `build()` | Build the registry |
 
 ## Background
 

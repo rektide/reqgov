@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_http_api_limiter_full_flow() {
-    let config = SmootherConfig::default();
-    let limiter = HttpApiRateLimiter::new(config);
+    let limiter = HttpApiRateLimiter::builder()
+        .smoother(SmootherConfig::default())
+        .build();
 
     let url = url::Url::parse("https://api.example.com/test").unwrap();
     limiter.set_url(url.clone()).await;
@@ -15,8 +16,11 @@ async fn test_http_api_limiter_full_flow() {
 
 #[tokio::test]
 async fn test_registry_multiple_origins() {
-    let config = SmootherConfig::default();
-    let registry = Arc::new(OriginRegistry::new(config));
+    let registry = Arc::new(
+        OriginRegistry::builder()
+            .smoother(SmootherConfig::default())
+            .build()
+    );
 
     let url1 = url::Url::parse("https://api.github.com/repos").unwrap();
     let url2 = url::Url::parse("https://api.gitlab.com/projects").unwrap();
@@ -33,8 +37,11 @@ async fn test_registry_multiple_origins() {
 
 #[tokio::test]
 async fn test_registry_same_origin_same_limiter() {
-    let config = SmootherConfig::default();
-    let registry = Arc::new(OriginRegistry::new(config));
+    let registry = Arc::new(
+        OriginRegistry::builder()
+            .smoother(SmootherConfig::default())
+            .build()
+    );
 
     let url1 = url::Url::parse("https://api.example.com/endpoint1").unwrap();
     let url2 = url::Url::parse("https://api.example.com/endpoint2").unwrap();
@@ -47,8 +54,11 @@ async fn test_registry_same_origin_same_limiter() {
 
 #[tokio::test]
 async fn test_registry_update_from_response() {
-    let config = SmootherConfig::default();
-    let registry = Arc::new(OriginRegistry::new(config));
+    let registry = Arc::new(
+        OriginRegistry::builder()
+            .smoother(SmootherConfig::default())
+            .build()
+    );
 
     let url = url::Url::parse("https://api.example.com/test").unwrap();
 
@@ -74,8 +84,11 @@ async fn test_registry_update_from_response() {
 
 #[tokio::test]
 async fn test_registry_concurrent_access() {
-    let config = SmootherConfig::default();
-    let registry = Arc::new(OriginRegistry::new(config));
+    let registry = Arc::new(
+        OriginRegistry::builder()
+            .smoother(SmootherConfig::default())
+            .build()
+    );
 
     let url = url::Url::parse("https://api.example.com/test").unwrap();
 
@@ -96,8 +109,11 @@ async fn test_registry_concurrent_access() {
 
 #[tokio::test]
 async fn test_http_api_limiter_concurrent_requests() {
-    let config = SmootherConfig::default();
-    let limiter = Arc::new(HttpApiRateLimiter::new(config));
+    let limiter = Arc::new(
+        HttpApiRateLimiter::builder()
+            .smoother(SmootherConfig::default())
+            .build()
+    );
 
     let url = url::Url::parse("https://api.example.com/test").unwrap();
     limiter.set_url(url.clone()).await;
