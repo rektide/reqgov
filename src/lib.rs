@@ -9,6 +9,6 @@ pub use origin::{Smoother, SmootherConfig};
 pub use origin::{parse_limit_header, parse_policy_header};
 pub use concurrency::{ConcurrencyRateLimiter, ConcurrencyRateLimiterBuilder, ConcurrencyRegistry, ConcurrencyRegistryBuilder};
 pub use tracing::{
-    PolicyTracer, SmootherTracer, StatusTracer, ConcurrencyTracer,
+    PolicyTracer, SmootherTracer, StatusTracer, ConcurrencyTracer, ResponseAdapter,
 };
 pub use url::origin_key;
