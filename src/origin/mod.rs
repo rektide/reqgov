@@ -8,6 +8,7 @@ pub mod smoother;
 pub mod parsing;
 pub mod check_result;
 pub mod spanful_limiter;
+pub mod header_detector;
 
 pub use origin_limiter::{OriginLimiter, OriginLimiterBuilder};
 pub use smoother_limiter::SmootherLimiter;
@@ -18,3 +19,4 @@ pub use slots::PolicySlot;
 pub use smoother::{Smoother, SmootherConfig};
 pub use parsing::{parse_policy_header, parse_limit_header};
 pub use spanful_limiter::OriginLimiterTracer;
+pub use header_detector::{detect_rate_limits, DetectedRateLimits};

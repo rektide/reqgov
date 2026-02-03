@@ -1,6 +1,6 @@
 # reqgov
 
-> Multi-timebase HTTP API rate limiting middleware for reqwest - supports IETF draft, GitHub, and GitLab
+> Multi-timebase HTTP API rate limiting middleware for reqwest - auto-detects IETF draft, GitHub, GitLab, and custom rate limit headers
 
 ## Table of Contents
 
@@ -55,9 +55,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Processing URL Lists with Backpressure
+
+Throw thousands of URLs at the library without overwhelming memory or the server:
+
+```rust
+use reqgov::{HttpApiRateLimiter, ResponseAdapter};
+use reqwest_middleware::ClientBuilder;
+use futures::stream::{self, StreamExt};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rate_limiter = HttpApiRateLimiter::builder().build();
+
+    let client = ClientBuilder::new(reqwest::Client::new())
+        .with(reqwest_ratelimit::all(rate_limiter))
+        .with(ResponseAdapter)
+        .build();
+
+    let urls = vec![
+        "https://api.github.com/repos/rust-lang/rust",
+        "https://api.github.com/repos/tokio-rs/tokio",
+        // ... thousands more
+    ];
+
+    stream::iter(urls)
+        .map(|url| async move {
+            client.get(url).send().await
+        })
+        .buffer_unordered(10)  // ← Max 10 concurrent requests
+        .for_each(|result| async move {
+            match result {
+                Ok(resp) => println!("{}: {}", resp.url(), resp.status()),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        })
+        .await;
+
+    Ok(())
+}
+```
+
+**`buffer_unordered(10)` provides two layers of control:**
+- **Backpressure**: Only 10 futures exist at any time, preventing memory explosion
+- **Concurrency limiting**: Rough equivalent to `max_concurrent_global(10)` semaphore
+
+Both patterns work — choose `buffer_unordered` for stream-based workflows or the semaphore for explicit control.
+
 ### Understanding Rate Limit Headers
 
-This library implements the [IETF draft specification](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/) for HTTP rate limit headers:
+This library automatically adapts to rate limit headers from any API:
+
+#### IETF Draft Spec (Preferred)
+If the API provides [IETF draft](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/) headers:
 
 **`RateLimit-Policy`** — Static configuration from the API:
 ```
@@ -70,6 +120,25 @@ Translation: 100 requests per minute (burst) and 1000 per day (daily).
 RateLimit: "burst";r=45;t=30, "daily";r=850
 ```
 Translation: 45 burst requests remaining (resets in 30s), 850 daily remaining.
+
+#### Auto-Detection (Common Formats)
+For APIs that use custom headers, the library probes and adapts:
+
+**GitHub style:**
+```
+X-RateLimit-Remaining: 4999
+X-RateLimit-Limit: 5000
+X-RateLimit-Reset: 1704067200
+```
+
+**GitLab style:**
+```
+RateLimit-Remaining: 1999
+RateLimit-Limit: 2000
+RateLimit-Reset: 1704067200
+```
+
+The library supports case-insensitive matching and multiple common header patterns.
 
 ### Per-Origin Rate Limiting
 
@@ -166,7 +235,42 @@ let client = ClientBuilder::new(reqwest::Client::new())
     .build();
 ```
 
- ## API
+### Auto-Detection Middleware
+
+The `ResponseAdapter` middleware automatically detects and configures rate limits from response headers:
+
+```rust
+use reqgov::{HttpApiRateLimiter, ResponseAdapter};
+use reqwest_middleware::ClientBuilder;
+use std::sync::Arc;
+
+let limiter = Arc::new(HttpApiRateLimiter::builder().build());
+
+let client = ClientBuilder::new(reqwest::Client::new())
+    .with(reqwest_ratelimit::all(limiter.clone()))
+    .with(ResponseAdapter)  // Auto-detect GitHub, GitLab, IETF headers
+    .build();
+```
+
+  ## API
+
+### ResponseAdapter
+
+Middleware that auto-detects rate limit headers and updates limiters.
+
+```rust
+use reqgov::ResponseAdapter;
+use reqwest_middleware::ClientBuilder;
+
+let client = ClientBuilder::new(reqwest::Client::new())
+    .with(ResponseAdapter)  // Auto-detect and adapt
+    .build();
+```
+
+- Probes responses for rate limit patterns (IETF, GitHub, GitLab, custom)
+- Automatically configures limiters when no policies exist
+- Case-insensitive header matching
+- Continues using detected configuration once established
 
 ### `SmootherConfig`
 
@@ -222,23 +326,27 @@ Thread-safe registry mapping domains to rate limiters.
 
 Every API communicates rate limits differently:
 
-- GitHub uses `x-ratelimit-remaining`
-- GitLab uses `RateLimit-Remaining`
-- Some use `retry-after`
+- GitHub uses `X-RateLimit-Remaining` / `X-RateLimit-Limit` / `X-RateLimit-Reset`
+- GitLab uses `RateLimit-Remaining` / `RateLimit-Limit` / `RateLimit-Reset`
+- Some use `retry-after` or `reset-after`
+- The IETF draft spec uses `RateLimit-Policy` and `RateLimit`
 - Many APIs don't tell you anything until you hit 429
 
 ### The Solution
 
-The IETF draft standardizes this with two headers that work together:
+The library implements the [IETF draft specification](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/) **and** auto-detects common custom formats:
 
-**`RateLimit-Policy`** — "Here are my rules" (static configuration)
+**IETF Draft** — "Here are my rules" and "Here's where you stand":
 ```
 RateLimit-Policy: "burst";q=100;w=60, "daily";q=1000;w=86400
+RateLimit: "burst";r=45;t=30, "daily";r=850
 ```
 
-**`RateLimit`** — "Here's where you stand" (dynamic state)
+**Auto-Detection** — Probes and adapts to any header format:
 ```
-RateLimit: "burst";r=45;t=30, "daily";r=850
+X-RateLimit-Remaining: 45
+X-RateLimit-Limit: 60
+X-RateLimit-Reset: 1704067200
 ```
 
 ### How It Works
@@ -248,6 +356,14 @@ RateLimit: "burst";r=45;t=30, "daily";r=850
 3. **Apply smoothing** → Prevent micro-bursts with 2-second intervals
 4. **Send request** → Proceed when all limits pass
 5. **Update from headers** → Reconfigure based on API response
+6. **Auto-probe** → If no policies exist, detect header format and configure automatically
+
+### Probing Behavior
+
+- **Initial requests**: Library probes response headers for rate limit patterns
+- **Detection**: GitHub, GitLab, and common formats automatically recognized
+- **Caching**: Once detected, policies persist for that origin
+- **Fallback**: If headers absent, requests proceed without limiting (safe default)
 
 ### Multiple Time Windows
 
@@ -279,10 +395,10 @@ A request must pass **ALL** limits to proceed.
 │                     reqwest-middleware                          │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │              HttpApiRateLimitMiddleware                   │  │
-│  │  ┌─────────────────────┐  ┌────────────────────────────┐  │  │
-│  │  │   OriginRegistry    │  │   RateLimitHeaderParser    │  │  │
-│  │  │  (domain → Limiter) │  │   (parse Policy/RateLimit) │  │  │
-│  │  └─────────┬───────────┘  └────────────┬───────────────┘  │  │
+│  │  ┌─────────────────────┐  ┌────────────────────────────┐   │  │
+│  │  │   OriginRegistry    │  │   HeaderDetector          │   │  │
+│  │  │  (domain → Limiter) │  │   (auto-detect patterns)  │   │  │
+│  │  └─────────┬───────────┘  └────────────┬───────────────┘   │  │
 │  │            │                           │                   │  │
 │  │            ▼                           ▼                   │  │
 │  │  ┌─────────────────────────────────────────────────────┐  │  │
@@ -301,8 +417,8 @@ A request must pass **ALL** limits to proceed.
 │  │  │  └──────────────────────────────────────────────┘   │  │  │
 │  │  └─────────────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────────┘  │
- └─────────────────────────────────────────────────────────────────┘
- ```
+└─────────────────────────────────────────────────────────────────┘
+```
 
  ## Technical Notes
 
@@ -336,18 +452,17 @@ Governor's architecture imposes constraints on what we can observe:
 
 - **Header parsing edge cases**: Test with malformed IETF headers to ensure tracing handles errors gracefully.
 
-### Rate Limiting Enhancements
+### Auto-Detection Implementation
 
-**Concurrency limiting** - Add optional global and per-domain semaphores to limit maximum concurrent requests:
+**Header detection** - Automatically recognize and configure for various rate limit header formats:
 
-- **Global semaphore**: Limit total concurrent requests across all domains (e.g., max 100 total requests system-wide)
-- **Per-domain semaphore**: Limit concurrent requests per origin/domain (e.g., max 10 requests per API domain)
-- **Optional enforcement**: Disabled by default to avoid breaking existing behavior
-- **Configuration**: Expose via `HttpApiRateLimiter::Config` or extend `SmootherConfig` with concurrency settings
-- **Implementation**: Use `tokio::sync::Semaphore` for async concurrency control, apply before rate limiting (concurrency limit first, then rate limit)
-- **Telemetry**: Add concurrent request count metrics (pending requests waiting on semaphore, active requests)
+- **Supported formats**: IETF draft spec, GitHub (`X-RateLimit-*`), GitLab (`RateLimit-*`), and common variants
+- **Case-insensitive matching**: Works regardless of header name casing
+- **Probing behavior**: Continues detecting until policies are established, then uses detected format
+- **Fallback**: Requests proceed without limiting if headers absent (safe default)
+- **Window inference**: Automatically infers time windows from reset timestamps (60s, 3600s, 86400s)
 
-This would allow users to control how many requests are made simultaneously, preventing overload and respecting API server capacity limits beyond rate limits.
+This allows the library to work with any API that provides rate limit headers, not just those following the IETF draft spec.
 
  ## Contributing
 
